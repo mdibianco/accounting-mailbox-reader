@@ -1,0 +1,605 @@
+# Keyword-based triage rules for email classification.
+# Edit this file to tune classification without touching code.
+# All patterns are case-insensitive substring matching (no regex).
+#
+# Scoring: subject match = 3 points, body match = 1 point
+# Confidence: 1 - e^(-0.23 * score)
+#   1 subject match (3 pts) ≈ 0.50 MEDIUM
+#   2 subject matches (6 pts) ≈ 0.75 MEDIUM
+#   3 subject matches (9 pts) ≈ 0.87 HIGH
+#   1 subject + 2 body (5 pts) ≈ 0.68 MEDIUM
+
+version: 1
+
+settings:
+  high_confidence_threshold: 0.80
+  medium_confidence_threshold: 0.50
+  subject_weight: 3.0
+  body_weight: 1.0
+  attachment_weight: 1.5
+  internal_domains:
+    - "eatplanted.com"
+    - "plantedfoods.ch"
+
+# ---------------------------------------------------------------------------
+# CATEGORY RULES
+# ---------------------------------------------------------------------------
+categories:
+
+  # === VEN-REM: Vendor Payment Reminder ===
+  # Vendor sends us a reminder that payment is overdue / approaching due date
+  VEN-REM:
+    name: "Vendor Payment Reminder"
+    keywords:
+      subject:
+        # English
+        - "payment reminder"
+        - "reminder notice"
+        - "overdue invoice"
+        - "outstanding invoice"
+        - "late payment"
+        - "past due"
+        - "amount overdue"
+        - "outstanding balance"
+        - "unpaid invoice"
+        - "final notice"
+        - "payment due"
+        - "still unpaid"
+        - "still outstanding"
+        - "payment overdue"
+        - "outstanding amount"
+        - "balance due"
+        - "second reminder"
+        - "third reminder"
+        - "last reminder"
+        - "urgent payment"
+        - "immediate payment required"
+        # German
+        - "Zahlungserinnerung"
+        - "Mahnung"
+        - "1. Mahnung"
+        - "2. Mahnung"
+        - "3. Mahnung"
+        - "letzte Mahnung"
+        - "offene Rechnung"
+        - "überfällige Rechnung"
+        - "Zahlungsverzug"
+        - "Erinnerung"
+        - "ausstehende Zahlung"
+        - "offener Betrag"
+        - "Zahlungsaufforderung"
+        - "Zahlungsrückstand"
+        - "offene Forderung"
+        - "ausstehender Betrag"
+        - "sofortige Zahlung"
+        - "Zahlungsfrist abgelaufen"
+        # French
+        - "rappel de paiement"
+        - "relance de paiement"
+        - "facture en retard"
+        - "facture impayée"
+        - "paiement en retard"
+        - "montant dû"
+        - "solde impayé"
+        - "facture en souffrance"
+        - "relance"
+        - "mise en demeure"
+        - "retard de paiement"
+        - "échéance dépassée"
+        - "dernier rappel"
+        - "deuxième rappel"
+        - "troisième rappel"
+        - "arriéré"
+        - "impayé"
+        # Italian
+        - "sollecito di pagamento"
+        - "promemoria di pagamento"
+        - "fattura scaduta"
+        - "fattura non pagata"
+        - "pagamento in ritardo"
+        - "importo dovuto"
+        - "saldo insoluto"
+        - "fattura insoluta"
+        - "sollecito"
+        - "secondo sollecito"
+        - "terzo sollecito"
+        - "ultimo sollecito"
+        - "scadenza superata"
+        - "pagamento urgente"
+        # Dutch
+        - "betalingsherinnering"
+        - "aanmaning"
+        - "eerste aanmaning"
+        - "tweede aanmaning"
+        - "derde aanmaning"
+        - "laatste aanmaning"
+        - "openstaande factuur"
+        - "achterstallige betaling"
+        - "onbetaalde factuur"
+        - "betalingsachterstand"
+        - "vervallen factuur"
+        - "openstaand bedrag"
+        - "betalingsverzoek"
+        - "direct betalen"
+      body:
+        # English
+        - "payment reminder"
+        - "overdue"
+        - "outstanding balance"
+        - "amount due"
+        - "past due"
+        - "unpaid invoice"
+        - "we remind you"
+        - "we have not received"
+        - "still unpaid"
+        - "still outstanding"
+        - "payment status"
+        - "payment is overdue"
+        - "remains unpaid"
+        - "remains outstanding"
+        - "have not yet received"
+        - "kindly settle"
+        - "please settle"
+        - "prompt payment"
+        # German
+        - "Mahnung"
+        - "offene Rechnung"
+        - "Zahlungserinnerung"
+        - "überfällig"
+        - "nicht bezahlt"
+        - "unbezahlt"
+        - "ausstehend"
+        - "Rückstand"
+        - "offene Forderung"
+        - "offener Posten"
+        - "noch nicht beglichen"
+        - "bitten wir Sie"
+        - "umgehende Zahlung"
+        - "umgehend zu begleichen"
+        - "dringend"
+        # French
+        - "rappel"
+        - "impayée"
+        - "en retard"
+        - "en souffrance"
+        - "solde impayé"
+        - "relance"
+        - "nous vous rappelons"
+        - "toujours en attente"
+        - "non réglé"
+        - "régler dans les plus brefs"
+        # Italian
+        - "sollecito"
+        - "fattura scaduta"
+        - "insoluto"
+        - "in ritardo"
+        - "non pagata"
+        - "vi ricordiamo"
+        - "ancora in sospeso"
+        - "saldare al più presto"
+        # Dutch
+        - "herinnering"
+        - "onbetaald"
+        - "openstaand"
+        - "achterstallig"
+        - "vervallen"
+        - "nog niet ontvangen"
+        - "verzoeken wij u"
+        - "spoedig te voldoen"
+      attachments: []
+    exclusions:
+      subject:
+        - "Issued reminder"  # Planted's own reminder → CUST-REM-FOLLOWUP
+      body: []
+      sender_domain:
+        - "eatplanted.com"
+        - "plantedfoods.ch"
+
+  # === VEN-INV: Vendor Invoice ===
+  # New invoice from a vendor (NOT a reminder about an old one)
+  VEN-INV:
+    name: "Vendor Invoice"
+    keywords:
+      subject:
+        # English
+        - "invoice"
+        - "bill"
+        - "invoice attached"
+        - "new invoice"
+        - "invoice number"
+        - "inv-"
+        - "inv #"
+        # German
+        - "Rechnung"
+        - "Rechnungsstellung"
+        - "Faktura"
+        - "Abrechnung"
+        - "Rechnung Nr"
+        - "RE-"
+        # French
+        - "facture"
+        - "facturation"
+        - "note de frais"
+        - "facture n°"
+        # Italian
+        - "fattura"
+        - "fatturazione"
+        - "nota di addebito"
+        - "fattura n."
+        # Dutch
+        - "factuur"
+        - "rekening"
+        - "nota"
+        - "factuur nr"
+      body:
+        # English
+        - "please find attached"
+        - "invoice attached"
+        - "attached invoice"
+        - "enclosed invoice"
+        - "please find enclosed"
+        - "for your records"
+        - "payment terms"
+        - "net 30"
+        - "net 60"
+        - "due within"
+        # German
+        - "anbei die Rechnung"
+        - "Rechnung im Anhang"
+        - "Rechnung anbei"
+        - "beigefügte Rechnung"
+        - "in der Anlage"
+        - "Zahlungsbedingungen"
+        - "zahlbar innerhalb"
+        - "zahlbar innert"
+        # French
+        - "ci-joint la facture"
+        - "veuillez trouver ci-joint"
+        - "facture ci-jointe"
+        - "en pièce jointe"
+        - "conditions de paiement"
+        # Italian
+        - "in allegato la fattura"
+        - "fattura allegata"
+        - "in allegato"
+        - "condizioni di pagamento"
+        # Dutch
+        - "bijgevoegd vindt u"
+        - "hierbij de factuur"
+        - "factuur bijgevoegd"
+        - "als bijlage"
+        - "betalingsvoorwaarden"
+      attachments:
+        - ".pdf"
+    exclusions:
+      subject:
+        # If any reminder language appears, this is VEN-REM not VEN-INV
+        - "reminder"
+        - "overdue"
+        - "outstanding"
+        - "past due"
+        - "unpaid"
+        - "Mahnung"
+        - "Erinnerung"
+        - "überfällig"
+        - "rappel"
+        - "relance"
+        - "impayé"
+        - "en retard"
+        - "sollecito"
+        - "scaduta"
+        - "insoluto"
+        - "aanmaning"
+        - "herinnering"
+        - "achterstallig"
+      body:
+        - "overdue"
+        - "unpaid"
+        - "reminder"
+        - "Mahnung"
+        - "überfällig"
+        - "unbezahlt"
+        - "rappel"
+        - "impayé"
+        - "sollecito"
+        - "insoluto"
+        - "herinnering"
+        - "onbetaald"
+      sender_domain: []
+
+  # === CUST-REM-FOLLOWUP: Customer Follow-up to Issued Payment Reminder ===
+  # Customer responds to a payment reminder that PLANTED sent them
+  CUST-REM-FOLLOWUP:
+    name: "Customer Follow-up to Issued Payment Reminder"
+    keywords:
+      subject:
+        - "Issued reminder"    # Planted's standard reminder format
+        - "RE: Issued reminder"
+        - "AW: Issued reminder"
+        - "Re: Issued reminder"
+      body:
+        - "Issued reminder"
+      attachments: []
+    exclusions:
+      subject: []
+      body: []
+      sender_domain: []
+
+  # === CUST-REMIT: Customer Remittance Advice ===
+  # Customer informs Planted of payments made
+  CUST-REMIT:
+    name: "Customer Remittance Advice"
+    keywords:
+      subject:
+        # English
+        - "remittance advice"
+        - "payment advice"
+        - "remittance"
+        - "payment statement"
+        - "payment allocation"
+        - "remittance notice"
+        - "payment confirmation"
+        - "wire transfer confirmation"
+        - "bank transfer"
+        - "payment made"
+        - "payment notification"
+        - "funds transfer"
+        # German
+        - "Zahlungsavis"
+        - "Zahlungsanzeige"
+        - "Zahlungseingangsmitteilung"
+        - "Überweisungsbestätigung"
+        - "Zahlungseingang"
+        - "Zahlungsbestätigung"
+        - "Kontoauszug"
+        - "Zahlungsmitteilung"
+        # French
+        - "avis de paiement"
+        - "avis de règlement"
+        - "avis de virement"
+        - "confirmation de paiement"
+        - "virement effectué"
+        - "relevé de paiement"
+        - "avis de remise"
+        - "avis de crédit"
+        # Italian
+        - "avviso di pagamento"
+        - "avviso di rimessa"
+        - "conferma di pagamento"
+        - "distinta di pagamento"
+        - "bonifico effettuato"
+        - "comunicazione di pagamento"
+        - "distinta di incasso"
+        - "rendiconto pagamenti"
+        # Dutch
+        - "betalingsadvies"
+        - "betalingsbewijs"
+        - "betalingsbevestiging"
+        - "overschrijvingsbewijs"
+        - "betaling verricht"
+        - "betalingsoverzicht"
+        - "betaling gedaan"
+      body:
+        # English
+        - "remittance advice"
+        - "payment advice"
+        - "payment allocated"
+        - "we have paid"
+        - "payment has been made"
+        - "funds have been transferred"
+        - "bank reference"
+        # German
+        - "Zahlungsavis"
+        - "Zahlung erfolgt"
+        - "überwiesen"
+        - "Zahlungseingang"
+        # French
+        - "avis de paiement"
+        - "paiement effectué"
+        - "virement effectué"
+        # Italian
+        - "avviso di pagamento"
+        - "pagamento effettuato"
+        - "bonifico effettuato"
+        # Dutch
+        - "betalingsadvies"
+        - "betaling gedaan"
+        - "overgemaakt"
+      attachments: []
+    exclusions:
+      subject: []
+      body: []
+      sender_domain: []
+
+  # NOTE: VEN-REMIT (Vendor Remittance Advice) is NOT keyword-classifiable.
+  # It shares "remittance" language with CUST-REMIT but direction is opposite.
+  # At keyword level it will match CUST-REMIT or fall to OTHER/LOW → triggers LLM.
+
+# ---------------------------------------------------------------------------
+# PRIORITY RULES
+# Scanned independently of category — any match escalates priority
+# ---------------------------------------------------------------------------
+priority:
+
+  PRIO_HIGHEST:
+    # Legal threats and proceedings
+    legal:
+      - "gerichtlich"
+      - "rechtliche Schritte"
+      - "Klage"
+      - "Anwalt eingeschaltet"
+      - "Rechtsanwalt"
+      - "legal action"
+      - "court proceedings"
+      - "lawsuit"
+      - "attorney"
+      - "solicitor"
+      - "legal proceedings"
+      - "action en justice"
+      - "procédure judiciaire"
+      - "avocat"
+      - "tribunal"
+      - "poursuites"
+      - "azione legale"
+      - "procedimento giudiziario"
+      - "avvocato"
+      - "tribunale"
+      - "procedura legale"
+      - "juridische stappen"
+      - "rechtszaak"
+      - "advocaat"
+      - "gerechtelijke procedure"
+      - "rechtsvordering"
+
+    # Debt collection and enforcement
+    collection:
+      - "Inkasso"
+      - "Betreibung"
+      - "Betreibungsandrohung"
+      - "Mahnbescheid"
+      - "Zwangsvollstreckung"
+      - "Pfändung"
+      - "Vollstreckung"
+      - "Schuldeneintreibung"
+      - "debt collection"
+      - "collection agency"
+      - "bailiff"
+      - "enforcement"
+      - "garnishment"
+      - "recouvrement"
+      - "huissier"
+      - "saisie"
+      - "injonction de payer"
+      - "mise en demeure"
+      - "incasso"
+      - "pignoramento"
+      - "decreto ingiuntivo"
+      - "esecuzione forzata"
+      - "recupero crediti"
+      - "incassobureau"
+      - "deurwaarder"
+      - "beslag"
+      - "dwangbevel"
+
+    # Delivery / service stop
+    service_stop:
+      - "Lieferstopp"
+      - "Leistungssperre"
+      - "Sperrung"
+      - "Kontosperrung"
+      - "Liefersperre"
+      - "Leistungseinstellung"
+      - "delivery stop"
+      - "service suspension"
+      - "account blocked"
+      - "supply halt"
+      - "service terminated"
+      - "account suspended"
+      - "arrêt de livraison"
+      - "suspension de service"
+      - "blocage de compte"
+      - "cessation de service"
+      - "blocco consegne"
+      - "sospensione servizio"
+      - "blocco account"
+      - "cessazione del servizio"
+      - "leveringsstop"
+      - "dienst opgeschort"
+      - "account geblokkeerd"
+      - "levering stopgezet"
+
+    # Extreme urgency language
+    extreme_urgency:
+      - "sofortige Zahlung"
+      - "unverzüglich"
+      - "immediate payment"
+      - "paiement immédiat"
+      - "pagamento immediato"
+      - "onmiddellijke betaling"
+      - "letzte Frist"
+      - "final deadline"
+      - "dernier délai"
+      - "ultima scadenza"
+      - "laatste termijn"
+      - "within 24 hours"
+      - "innerhalb von 24 Stunden"
+      - "dans les 24 heures"
+      - "entro 24 ore"
+
+  PRIO_HIGH:
+    # Executive committee senders (checked against from_name / from_email)
+    executive_senders:
+      - "Christoph Jenny"
+      - "Lukas Böni"
+      - "Pascal Bieri"
+      - "Rasmus Burchardt"
+      - "Judith Wemmer"
+      - "David Weber"
+      - "Marion Höchli"
+      - "Samira Eilinger"
+
+    # Escalation / repeated reminders
+    escalation:
+      - "2. Mahnung"
+      - "3. Mahnung"
+      - "zweite Mahnung"
+      - "dritte Mahnung"
+      - "letzte Mahnung"
+      - "second reminder"
+      - "third reminder"
+      - "final reminder"
+      - "last warning"
+      - "deuxième rappel"
+      - "troisième rappel"
+      - "dernier rappel"
+      - "dernière relance"
+      - "secondo sollecito"
+      - "terzo sollecito"
+      - "ultimo sollecito"
+      - "tweede aanmaning"
+      - "derde aanmaning"
+      - "laatste aanmaning"
+
+    # Blocking work
+    blocking:
+      - "blockiert"
+      - "blocking"
+      - "can't proceed"
+      - "cannot proceed"
+      - "bloquant"
+      - "bloqué"
+      - "ne peut pas continuer"
+      - "bloccato"
+      - "non possiamo procedere"
+      - "geblokkeerd"
+      - "kunnen niet verder"
+
+    # Penalties and fees
+    penalties:
+      - "Verzugszinsen"
+      - "Mahngebühr"
+      - "Mahnspesen"
+      - "late fees"
+      - "penalty"
+      - "interest charges"
+      - "late interest"
+      - "pénalités de retard"
+      - "intérêts de retard"
+      - "frais de rappel"
+      - "interessi di mora"
+      - "penale"
+      - "spese di sollecito"
+      - "boeterente"
+      - "aanmaningskosten"
+      - "vertragingsrente"
+
+    # System/process issues
+    system_issues:
+      - "Systemfehler"
+      - "system error"
+      - "system malfunction"
+      - "erreur système"
+      - "errore di sistema"
+      - "systeemfout"
+      - "data integrity"
+      - "Datenintegrität"

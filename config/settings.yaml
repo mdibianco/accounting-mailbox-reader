@@ -1,0 +1,89 @@
+# Accounting Mailbox Triage Configuration
+accounting_triage:
+  mailbox: "accounting@eatplanted.com"
+  dry_run: true
+  poll_interval_minutes: 5
+  
+  # Email reading
+  email_reader:
+    max_emails: 50
+    days_back: 7
+    
+  # Classification (Phase 1+)
+  classification:
+    model: "claude-sonnet-4-20250514"
+    min_confidence: 0.75
+    use_attachment_content: true
+    max_attachment_size_mb: 25
+  
+  # Risk assessment (Phase 1+)
+  risk:
+    amount_threshold_high: 50000  # CHF
+    amount_threshold_critical: 100000
+    overdue_days_high: 60
+    overdue_days_critical: 90
+  
+  # Attachment processing
+  attachments:
+    enabled: true
+    ocr_enabled: false  # Set to true if Tesseract is installed
+    supported_formats:
+      - ".pdf"
+      - ".xlsx"
+      - ".xls"
+      - ".csv"
+      - ".png"
+      - ".jpg"
+    max_size_mb: 25
+  
+  # Graph API
+  graph_api:
+    scope:
+      - "Mail.Read.Shared"
+      - "Mail.ReadWrite.Shared"
+    batch_size: 10
+
+# Business Central data lookup (via Fabric Lakehouse SQL)
+business_central:
+  # Fabric Lakehouse table
+  database: "Finance_LakeHouse_Mod"
+  schema: "dbo"
+  table: "bc_vendor_ledger_entry"
+
+  # Column names (matching actual Fabric schema)
+  columns:
+    entity: "entity"
+    external_document_no: "external_document_no"
+    vendor_no: "vendor_no"
+    vendor_name: "vendor_name"
+    amount: "amount"
+    remaining_amount: "remaining_amount"
+    due_date: "due_date"
+    posting_date: "posting_date"
+    document_date: "document_date"
+    open: "open"
+    document_type: "document_type"
+    document_no: "document_no"
+    currency_code: "currency_code"
+    description: "description"
+    on_hold: "on_hold"
+    closed_at_date: "closed_at_date"
+    original_amount: "original_amount"
+    payment_method_code: "payment_method_code"
+    payment_reference: "payment_reference"
+
+  # Human-readable entity names
+  entity_names:
+    AT1: "Planted Foods Austria GmbH"
+    CH1: "Planted Foods AG"
+    DE1: "Planted Foods GmbH"
+    DE2: "Planted Foods Production GmbH"
+    FR1: "Planted Foods SAS"
+    IT1: "Planted Foods SRL"
+    UK1: "Eatplanted Ltd"
+
+# Logging
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: "logs/accounting_triage.log"
