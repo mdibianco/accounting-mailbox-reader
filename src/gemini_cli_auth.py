@@ -189,6 +189,14 @@ def call_gemini(
             pass
         raise RuntimeError(f"Gemini API error ({resp.status_code}): {error_msg}")
 
+    # Count successful API call
+    try:
+        from src import api_counter
+        total = api_counter.increment(model)
+        _cascade_logger.info(f"API call #{total} today (model: {model})")
+    except ImportError:
+        pass  # Standalone usage outside src package
+
     data = resp.json()
 
     # Extract text from response

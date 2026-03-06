@@ -78,6 +78,18 @@ class Config:
         """Confluence API token for authentication."""
         return os.getenv("CONFLUENCE_API_TOKEN", "")
 
+    # --- Jira Configuration ---
+
+    @property
+    def jira_user_email(self) -> str:
+        """Jira user email for Basic Auth."""
+        return os.getenv("JIRA_USER_EMAIL", "")
+
+    @property
+    def jira_api_token(self) -> str:
+        """Jira API token for Basic Auth."""
+        return os.getenv("JIRA_API_TOKEN", "")
+
     # --- Fabric / Business Central Configuration ---
 
     @property

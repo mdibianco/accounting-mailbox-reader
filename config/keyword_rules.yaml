@@ -11,6 +11,31 @@
 
 version: 1
 
+# ---------------------------------------------------------------------------
+# RIGID RULES (High-Certainty Pre-Filter)
+# ---------------------------------------------------------------------------
+# These rules run FIRST before probabilistic keyword scoring.
+# If ANY rule matches completely, email is classified as NO_ACTION_NEEDED
+# with HIGH confidence and PRIO_LOW. No LLM classification needed.
+#
+# All conditions in a rule must match (AND logic):
+# - sender_email_exact: exact sender address match
+# - sender_domain: substring match (e.g., @eatplanted.com)
+# - subject_starts_with: list of allowed subject prefixes (any match)
+#
+rigid_rules:
+  # Calendar responses from @eatplanted.com employees (noise)
+  - description: "Outlook calendar acceptance/tentative/decline"
+    sender_domain: "@eatplanted.com"
+    subject_starts_with:
+      - "Accepted: "
+      - "Tentative: "
+      - "Declined: "
+
+  # Jira notifications (generally no accounting action needed)
+  - description: "Jira notification emails"
+    sender_email_exact: "jira@eatplanted.atlassian.net"
+
 settings:
   high_confidence_threshold: 0.80
   medium_confidence_threshold: 0.50
@@ -411,9 +436,10 @@ categories:
       body: []
       sender_domain: []
 
-  # NOTE: VEN-REMIT (Vendor Remittance Advice) is NOT keyword-classifiable.
-  # It shares "remittance" language with CUST-REMIT but direction is opposite.
-  # At keyword level it will match CUST-REMIT or fall to OTHER/LOW → triggers LLM.
+  # NOTE: VEN-FOLLOWUP (Vendor Follow-up Query) is NOT keyword-classifiable.
+  # It shares language with CUST-REMIT and overlaps with VEN-REM keywords.
+  # Intent detection requires LLM analysis — emails arrive as VEN-REM or OTHER,
+  # then get reclassified to VEN-FOLLOWUP by Pass2 Task 0.
 
 # ---------------------------------------------------------------------------
 # PRIORITY RULES

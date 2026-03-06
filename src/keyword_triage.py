@@ -7,6 +7,8 @@ from typing import Dict, List, Optional, Tuple
 
 import yaml
 
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -17,9 +19,10 @@ class KeywordTriage:
     CATEGORY_NAMES = {
         "VEN-INV": "Vendor Invoice",
         "VEN-REM": "Vendor Payment Reminder",
-        "VEN-REMIT": "Vendor Remittance Advice",
+        "VEN-FOLLOWUP": "Vendor Follow-up Query",
         "CUST-REM-FOLLOWUP": "Customer Follow-up to Issued Payment Reminder",
         "CUST-REMIT": "Customer Remittance Advice",
+        "NO_ACTION_NEEDED": "No Action Needed",
         "OTHER": "Uncategorized / Other",
     }
 
@@ -62,6 +65,7 @@ class KeywordTriage:
         """
         # Normalize inputs
         subject_lower = (email.get("subject") or "").lower()
+        subject_original = (email.get("subject") or "")
         body_preview_lower = (email.get("body_preview") or "").lower()
         body_lower = (email.get("body") or "").lower()
         searchable_body = body_preview_lower + " " + body_lower
@@ -75,6 +79,17 @@ class KeywordTriage:
             sender_email = (email.get("from_email") or "").lower()
             sender_name = (email.get("from_name") or "").lower()
 
+        # Check rigid rules first (high-certainty matches) before probabilistic scoring
+        rigid_result = self._check_rigid_rules(sender_email, subject_original)
+        if rigid_result:
+            return rigid_result
+
+        # Detect if this is a reply/forward chain (subject line indicator)
+        is_reply_forward = any(
+            subject_lower.startswith(prefix)
+            for prefix in ["re:", "fw:", "fwd:", "aw:"]
+        )
+
         # Attachment extensions
         att_extensions = []
         for att in email.get("attachments", []):
@@ -86,8 +101,8 @@ class KeywordTriage:
         scores: Dict[str, Tuple[float, float, List[str]]] = {}
         for cat_id, cat_config in self.categories.items():
             raw_score, matched = self._score_category(
-                cat_config, subject_lower, searchable_body,
-                sender_email, att_extensions,
+                cat_id, cat_config, subject_lower, searchable_body,
+                sender_email, att_extensions, is_reply_forward,
             )
             confidence = self._score_to_confidence(raw_score)
             scores[cat_id] = (raw_score, confidence, matched)
@@ -105,17 +120,84 @@ class KeywordTriage:
 
         return self._build_result(best_cat, best_conf, best_matched, scores, sender_email, sender_name, subject_lower, searchable_body)
 
+    def _check_rigid_rules(self, sender_email: str, subject_original: str) -> Optional[Dict]:
+        """
+        Check rigid high-certainty rules before probabilistic scoring.
+        Returns a classification dict if a rule matches, None otherwise.
+        """
+        rigid_rules = self.rules.get("rigid_rules", [])
+        if not rigid_rules:
+            return None
+
+        subject_lower = subject_original.lower()
+
+        for rule in rigid_rules:
+            # All conditions in a rule must match (AND logic)
+            match = True
+
+            # Check sender_email_exact (exact string match)
+            if "sender_email_exact" in rule:
+                if rule["sender_email_exact"].lower() != sender_email:
+                    match = False
+
+            # Check sender_domain (substring match)
+            if match and "sender_domain" in rule:
+                if rule["sender_domain"].lower() not in sender_email:
+                    match = False
+
+            # Check subject_starts_with (any prefix match)
+            if match and "subject_starts_with" in rule:
+                prefixes = rule["subject_starts_with"]
+                prefix_match = False
+                for prefix in prefixes:
+                    if subject_original.startswith(prefix):
+                        prefix_match = True
+                        break
+                if not prefix_match:
+                    match = False
+
+            # If all conditions matched, return NO_ACTION_NEEDED with HIGH confidence
+            if match:
+                logger.info(f"Rigid rule matched: {rule.get('description', 'Unknown rule')}")
+                return {
+                    "confidence_level": "HIGH",
+                    "primary_category": {
+                        "id": "NO_ACTION_NEEDED",
+                        "name": self.CATEGORY_NAMES.get("NO_ACTION_NEEDED", "No Action Needed"),
+                    },
+                    "secondary_category": None,
+                    "priority": "PRIO_LOW",
+                    "requires_manual_review": False,
+                    "extracted_entities": {},
+                    "summary": None,
+                    "reasoning": f"Rigid rule matched: {rule.get('description', 'No action needed email')}",
+                    "classification_method": "keyword",
+                    "keyword_confidence": 1.0,
+                    "keyword_scores": {},
+                }
+
+        return None
+
     def _score_category(
         self,
+        cat_id: str,
         cat_config: dict,
         subject_lower: str,
         searchable_body: str,
         sender_email: str,
         att_extensions: List[str],
+        is_reply_forward: bool = False,
     ) -> Tuple[float, List[str]]:
         """Score a single category. Returns (raw_score, matched_patterns)."""
         score = 0.0
         matched = []
+
+        # VEN-INV requires fresh email (not reply/forward) AND must have attachments
+        if cat_id == "VEN-INV":
+            if is_reply_forward:
+                return (-1.0, ["EXCLUDED: Reply/Forward chain (RE:/FW:/AW:)"])
+            if not att_extensions:
+                return (-1.0, ["EXCLUDED: No attachments (VEN-INV requires attachment)"])
 
         keywords = cat_config.get("keywords", {})
         exclusions = cat_config.get("exclusions", {})

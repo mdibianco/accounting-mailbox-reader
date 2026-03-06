@@ -16,6 +16,9 @@ from .graph_client import GraphAPIClient
 
 logger = logging.getLogger(__name__)
 
+# Hard cap: individual email JSONs should never exceed this (bytes)
+MAX_JSON_SIZE_BYTES = 200_000  # 200 KB
+
 
 class OutputFormatter:
     """Formats email data for output (JSON, console table, etc.)."""
@@ -295,12 +298,28 @@ class OutputFormatter:
                 # Convert email to JSON
                 email_json = json.dumps(email.to_dict(), indent=2)
 
+                # Safety net: warn and truncate if still over hard cap
+                json_bytes = len(email_json.encode("utf-8"))
+                if json_bytes > MAX_JSON_SIZE_BYTES:
+                    logger.warning(
+                        f"⚠ {filename} is {json_bytes:,} bytes (cap: {MAX_JSON_SIZE_BYTES:,}). "
+                        f"Truncating attachment texts further."
+                    )
+                    email_dict = json.loads(email_json)
+                    for att in email_dict.get("attachments", []):
+                        et = att.get("extracted_text")
+                        if et and et.get("text") and len(et["text"]) > 2000:
+                            et["text"] = et["text"][:2000] + "\n\n[...hard-truncated to fit 200KB cap]"
+                    if email_dict.get("body") and len(email_dict["body"]) > 5000:
+                        email_dict["body"] = email_dict["body"][:5000] + "\n\n[...hard-truncated to fit 200KB cap]"
+                    email_json = json.dumps(email_dict, indent=2)
+
                 # Write to file
                 with open(file_path, "w", encoding="utf-8") as f:
                     f.write(email_json)
 
                 stats["successful"] += 1
-                logger.info(f"✓ Saved: {filename}")
+                logger.info(f"✓ Saved: {filename} ({json_bytes:,} bytes)")
 
             except Exception as e:
                 stats["failed"] += 1
@@ -436,6 +455,22 @@ class OutputFormatter:
                 # Convert email to JSON (single email, not wrapped in array)
                 email_json = json.dumps(email.to_dict(), indent=2)
                 file_content = email_json.encode("utf-8")
+
+                # Safety net: truncate if over hard cap
+                if len(file_content) > MAX_JSON_SIZE_BYTES:
+                    logger.warning(
+                        f"⚠ {filename} is {len(file_content):,} bytes (cap: {MAX_JSON_SIZE_BYTES:,}). "
+                        f"Truncating attachment texts further."
+                    )
+                    email_dict = json.loads(email_json)
+                    for att in email_dict.get("attachments", []):
+                        et = att.get("extracted_text")
+                        if et and et.get("text") and len(et["text"]) > 2000:
+                            et["text"] = et["text"][:2000] + "\n\n[...hard-truncated to fit 200KB cap]"
+                    if email_dict.get("body") and len(email_dict["body"]) > 5000:
+                        email_dict["body"] = email_dict["body"][:5000] + "\n\n[...hard-truncated to fit 200KB cap]"
+                    email_json = json.dumps(email_dict, indent=2)
+                    file_content = email_json.encode("utf-8")
 
                 # Upload to SharePoint
                 result = graph_client.upload_to_sharepoint(

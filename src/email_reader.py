@@ -31,8 +31,18 @@ class Attachment:
             "size": self.size,
         }
         if self.extracted_text:
-            data["extracted_text"] = asdict(self.extracted_text)
+            et = asdict(self.extracted_text)
+            # Truncate extracted text to prevent JSON explosion from large PDFs
+            if et.get("text") and len(et["text"]) > MAX_ATTACHMENT_TEXT_CHARS:
+                et["text"] = et["text"][:MAX_ATTACHMENT_TEXT_CHARS] + f"\n\n[...truncated at {MAX_ATTACHMENT_TEXT_CHARS:,} chars]"
+            data["extracted_text"] = et
         return data
+
+
+# Size limits to prevent JSON explosion (e.g. giant PDFs, long email chains)
+MAX_BODY_CHARS = 10_000          # ~10 KB — anything longer is quoted reply chains
+MAX_ATTACHMENT_TEXT_CHARS = 15_000  # ~15 KB per attachment — enough for ~5-page invoice
+MAX_BODY_ENGLISH_CHARS = 10_000
 
 
 @dataclass
@@ -54,12 +64,29 @@ class Email:
     pass2_results: Optional[dict] = None
     body_english: Optional[str] = None
     processing_status: str = "OPEN"
+    # Recipients
+    to_recipients: List[dict] = field(default_factory=list)
+    cc_recipients: List[dict] = field(default_factory=list)
+    # Conversation threading
+    web_link: Optional[str] = None  # From Graph API webLink
+    graph_conversation_id: Optional[str] = None  # From Graph API conversationId
+    conversation_id: Optional[str] = None
+    conversation_position: int = 1
+    is_latest_in_conversation: bool = True
+    related_emails: List[dict] = field(default_factory=list)
+    is_chain: bool = False  # True if this email is part of a multi-email conversation
+    jira_issue_key: Optional[str] = None  # Jira ticket key (e.g. "FH20-123")
+
+    @staticmethod
+    def _truncate(text: Optional[str], limit: int) -> Optional[str]:
+        """Truncate text to limit, appending marker if truncated."""
+        if text is None or len(text) <= limit:
+            return text
+        return text[:limit] + f"\n\n[...truncated at {limit:,} chars]"
 
     def to_dict(self):
         """Convert to dictionary for JSON serialization."""
-        from urllib.parse import quote
-        mailbox = config.accounting_mailbox
-        outlook_link = f"https://outlook.office.com/mail/{mailbox}/id/{quote(self.id, safe='')}"
+        outlook_link = self.web_link or ""
         data = {
             "id": self.id,
             "outlook_link": outlook_link,
@@ -71,18 +98,34 @@ class Email:
             "subject": self.subject,
             "received_datetime": self.received_datetime,
             "body_preview": self.body_preview,
-            "body": self.body,
+            "body": self._truncate(self.body, MAX_BODY_CHARS),
             "has_attachments": self.has_attachments,
             "is_read": self.is_read,
             "importance": self.importance,
             "attachments": [a.to_dict() for a in self.attachments],
         }
+        if self.to_recipients:
+            data["to_recipients"] = self.to_recipients
+        if self.cc_recipients:
+            data["cc_recipients"] = self.cc_recipients
+        if self.jira_issue_key:
+            data["jira_issue_key"] = self.jira_issue_key
         if self.classification:
             data["classification"] = self.classification
         if self.pass2_results:
             data["pass2_results"] = self.pass2_results
         if self.body_english:
-            data["body_english"] = self.body_english
+            data["body_english"] = self._truncate(self.body_english, MAX_BODY_ENGLISH_CHARS)
+        # Conversation threading
+        if self.graph_conversation_id:
+            data["graph_conversation_id"] = self.graph_conversation_id
+        if self.conversation_id:
+            data["conversation_id"] = self.conversation_id
+            data["conversation_position"] = self.conversation_position
+            data["is_latest_in_conversation"] = self.is_latest_in_conversation
+            data["is_chain"] = self.is_chain
+            if self.related_emails:
+                data["related_emails"] = self.related_emails
         return data
 
 
@@ -131,8 +174,11 @@ class EmailReader:
             search_query=search_query,
         )
 
+        if messages is None:
+            raise RuntimeError("Failed to fetch emails from mailbox (API error). Check logs for details.")
+
         if not messages:
-            logger.warning("No messages found")
+            logger.info("No messages found")
             return []
 
         emails = []
@@ -167,6 +213,22 @@ class EmailReader:
         """Parse a Graph API message object into an Email object."""
         from_data = msg.get("from", {}).get("emailAddress", {})
 
+        # Parse recipients (format: [{"emailAddress": {"address": "...", "name": "..."}}])
+        def parse_recipients(recipients_list):
+            """Parse recipient array from Graph API."""
+            result = []
+            if recipients_list:
+                for recipient in recipients_list:
+                    email_address = recipient.get("emailAddress", {})
+                    result.append({
+                        "email": email_address.get("address", ""),
+                        "name": email_address.get("name", "")
+                    })
+            return result
+
+        to_recipients = parse_recipients(msg.get("toRecipients", []))
+        cc_recipients = parse_recipients(msg.get("ccRecipients", []))
+
         return Email(
             id=msg.get("id", ""),
             from_email=from_data.get("address", ""),
@@ -177,6 +239,10 @@ class EmailReader:
             has_attachments=msg.get("hasAttachments", False),
             is_read=msg.get("isRead", False),
             importance=msg.get("importance", "normal").lower(),
+            to_recipients=to_recipients,
+            cc_recipients=cc_recipients,
+            web_link=msg.get("webLink"),
+            graph_conversation_id=msg.get("conversationId"),
         )
 
     def _extract_text_from_html(self, html: str) -> str:

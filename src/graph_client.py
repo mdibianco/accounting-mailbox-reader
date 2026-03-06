@@ -2,6 +2,7 @@
 
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -9,6 +10,11 @@ import msal
 import requests
 
 from .config import config
+
+# Retry settings
+MAX_RETRIES = 3
+RETRY_BACKOFF_BASE = 2  # seconds: 2, 4, 8
+RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 
 logger = logging.getLogger(__name__)
 
@@ -113,8 +119,24 @@ class GraphAPIClient:
             logger.error(f"Failed to acquire token: {error}")
             return None
 
+    def check_health(self, mailbox: str) -> tuple[bool, str]:
+        """
+        Quick health check: verify token + permissions via a lightweight mail API call.
+        Uses _make_request so it benefits from retry logic and token refresh.
+
+        Returns (ok, message).
+        """
+        result = self._make_request(
+            "GET",
+            f"/users/{mailbox}/mailFolders/inbox",
+            params={"$select": "id"},
+        )
+        if result is not None:
+            return True, "OK"
+        return False, "Graph API unreachable - check token, permissions, and network"
+
     def _make_request(self, method: str, endpoint: str, **kwargs) -> Optional[dict]:
-        """Make a request to Graph API."""
+        """Make a request to Graph API with retry on transient errors."""
         self.token = self._get_token()
         if not self.token:
             logger.error("No valid token available")
@@ -126,13 +148,60 @@ class GraphAPIClient:
             "Content-Type": "application/json",
         }
 
-        try:
-            response = requests.request(method, url, headers=headers, **kwargs)
-            response.raise_for_status()
-            return response.json()
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Graph API request failed: {e}")
-            return None
+        last_error = None
+        for attempt in range(MAX_RETRIES):
+            try:
+                response = requests.request(method, url, headers=headers, timeout=30, **kwargs)
+
+                # Retryable server/throttle errors
+                if response.status_code in RETRYABLE_STATUS_CODES:
+                    retry_after = int(response.headers.get("Retry-After", RETRY_BACKOFF_BASE ** (attempt + 1)))
+                    logger.warning(
+                        f"Graph API {response.status_code} (attempt {attempt + 1}/{MAX_RETRIES}), "
+                        f"retrying in {retry_after}s..."
+                    )
+                    time.sleep(retry_after)
+                    last_error = f"{response.status_code}: {response.text[:200]}"
+                    continue
+
+                # 401/403 = token expired or revoked, clear cache and re-acquire
+                if response.status_code in (401, 403) and attempt == 0:
+                    logger.warning(
+                        f"Token rejected ({response.status_code}), clearing cache and re-authenticating..."
+                    )
+                    for acct in self.app.get_accounts():
+                        self.app.remove_account(acct)
+                    self._save_cache()
+                    self.token = self._get_token()
+                    if self.token:
+                        headers["Authorization"] = f"Bearer {self.token}"
+                        continue
+
+                response.raise_for_status()
+
+                # Some endpoints return 202/204 with no body
+                if response.status_code in (202, 204) or not response.content:
+                    return {}
+                return response.json()
+
+            except requests.exceptions.Timeout:
+                last_error = f"Timeout (attempt {attempt + 1}/{MAX_RETRIES})"
+                logger.warning(last_error)
+                if attempt < MAX_RETRIES - 1:
+                    time.sleep(RETRY_BACKOFF_BASE ** (attempt + 1))
+                continue
+            except requests.exceptions.ConnectionError as e:
+                last_error = f"Connection error (attempt {attempt + 1}/{MAX_RETRIES}): {e}"
+                logger.warning(last_error)
+                if attempt < MAX_RETRIES - 1:
+                    time.sleep(RETRY_BACKOFF_BASE ** (attempt + 1))
+                continue
+            except requests.exceptions.RequestException as e:
+                logger.error(f"Graph API request failed: {e}")
+                return None
+
+        logger.error(f"Graph API request failed after {MAX_RETRIES} retries: {last_error}")
+        return None
 
     def get_mailbox_messages(
         self,
@@ -170,7 +239,7 @@ class GraphAPIClient:
             "$top": min(max_results, 250),  # Graph API limit
             "$orderby": "receivedDateTime desc",
             "$select": (
-                "id,from,subject,bodyPreview,receivedDateTime,"
+                "id,webLink,conversationId,from,toRecipients,ccRecipients,subject,bodyPreview,receivedDateTime,"
                 "hasAttachments,importance,isRead"
             ),
         }
@@ -272,6 +341,108 @@ class GraphAPIClient:
             "destinationId": destination_folder_id
         })
 
+    def forward_message(
+        self, mailbox: str, message_id: str, to_addresses: list, comment: str = ""
+    ) -> bool:
+        """
+        Forward a message to one or more recipients.
+
+        Args:
+            mailbox: Email address of the mailbox
+            message_id: Message ID to forward
+            to_addresses: List of email addresses to forward to
+            comment: Optional comment to include in the forward
+
+        Returns:
+            True if successful, False otherwise
+        """
+        endpoint = f"/users/{mailbox}/messages/{message_id}/forward"
+        payload = {
+            "comment": comment,
+            "toRecipients": [
+                {"emailAddress": {"address": addr}} for addr in to_addresses
+            ]
+        }
+        result = self._make_request("POST", endpoint, json=payload)
+        return result is not None
+
+    def create_draft_reply(
+        self, mailbox: str, message_id: str, body_html: str
+    ) -> Optional[str]:
+        """
+        Create a draft reply to a message.
+
+        Args:
+            mailbox: Email address of the mailbox
+            message_id: Message ID to reply to
+            body_html: Reply body in HTML format
+
+        Returns:
+            Draft message ID if successful, None otherwise
+        """
+        # First, create the reply draft
+        endpoint = f"/users/{mailbox}/messages/{message_id}/createReply"
+        draft_result = self._make_request("POST", endpoint, json={})
+
+        if not draft_result or "id" not in draft_result:
+            logger.error("Failed to create draft reply")
+            return None
+
+        draft_id = draft_result["id"]
+
+        # Now update the draft with the body content
+        endpoint = f"/users/{mailbox}/messages/{draft_id}"
+        update_result = self._make_request(
+            "PATCH",
+            endpoint,
+            json={
+                "body": {
+                    "contentType": "HTML",
+                    "content": body_html
+                }
+            }
+        )
+
+        if update_result:
+            logger.info(f"Draft reply created: {draft_id}")
+            return draft_id
+        else:
+            logger.error(f"Failed to update draft reply body: {draft_id}")
+            return None
+
+    def send_mail(
+        self, mailbox: str, to_recipients: list, subject: str, body: str, is_html: bool = False
+    ) -> bool:
+        """
+        Send an email message.
+
+        Args:
+            mailbox: Email address of the mailbox to send from
+            to_recipients: List of recipient email addresses
+            subject: Email subject
+            body: Email body content
+            is_html: Whether the body is HTML or plain text
+
+        Returns:
+            True if successful, False otherwise
+        """
+        endpoint = f"/users/{mailbox}/sendMail"
+        payload = {
+            "message": {
+                "subject": subject,
+                "body": {
+                    "contentType": "HTML" if is_html else "Text",
+                    "content": body
+                },
+                "toRecipients": [
+                    {"emailAddress": {"address": addr}} for addr in to_recipients
+                ]
+            },
+            "saveToSentItems": True
+        }
+        result = self._make_request("POST", endpoint, json=payload)
+        return result is not None
+
     def get_or_create_folder(
         self, mailbox: str, folder_path: str
     ) -> Optional[str]:
@@ -320,25 +491,125 @@ class GraphAPIClient:
         self, mailbox: str, flag_status: str = "complete"
     ) -> Optional[list]:
         """
-        Get messages in Inbox with a specific flag status.
+        Get ALL messages in Inbox with a specific flag status (with pagination).
 
         Args:
             mailbox: Email address
             flag_status: "flagged", "complete", or "notFlagged"
 
         Returns:
-            List of messages or None
+            List of all messages or None
         """
         endpoint = f"/users/{mailbox}/mailFolders/inbox/messages"
+        all_messages = []
+        skip = 0
+        page_size = 250
+
+        while True:
+            params = {
+                "$filter": f"flag/flagStatus eq '{flag_status}'",
+                "$select": "id,subject,receivedDateTime,flag,categories",
+                "$top": page_size,
+                "$skip": skip,
+            }
+            result = self._make_request("GET", endpoint, params=params)
+            if result and "value" in result:
+                messages = result["value"]
+                if not messages:
+                    break
+                all_messages.extend(messages)
+                skip += page_size
+            else:
+                break
+
+        return all_messages if all_messages else None
+
+    def get_folder_id(
+        self, mailbox: str, folder_path: str
+    ) -> Optional[str]:
+        """
+        Find a mail folder by path (e.g., 'Reminders' or 'Parent/Child').
+        Read-only — does not create missing folders.
+
+        Returns folder ID or None if not found.
+        """
+        parts = [p.strip() for p in folder_path.split("/") if p.strip()]
+        parent_id = None
+
+        for part in parts:
+            if parent_id:
+                endpoint = f"/users/{mailbox}/mailFolders/{parent_id}/childFolders"
+            else:
+                endpoint = f"/users/{mailbox}/mailFolders"
+
+            result = self._make_request("GET", endpoint, params={
+                "$filter": f"displayName eq '{part}'",
+                "$top": 1,
+            })
+
+            if result and result.get("value"):
+                parent_id = result["value"][0]["id"]
+            else:
+                logger.error(f"Folder not found: {part}")
+                return None
+
+        return parent_id
+
+    def get_folder_messages(
+        self, mailbox: str, folder_id: str,
+        max_results: int = 1000, days_back: int = 60,
+    ) -> Optional[list]:
+        """
+        Get messages from a specific folder with pagination support.
+
+        Returns list of messages (up to max_results) or None.
+        """
+        from datetime import datetime, timedelta
+
+        days_ago = datetime.utcnow() - timedelta(days=days_back)
+        date_filter = f"receivedDateTime ge {days_ago.isoformat()}Z"
+
+        endpoint = f"/users/{mailbox}/mailFolders/{folder_id}/messages"
         params = {
-            "$filter": f"flag/flagStatus eq '{flag_status}'",
-            "$select": "id,subject,receivedDateTime,flag,categories",
-            "$top": 250,
+            "$filter": date_filter,
+            "$top": min(max_results, 250),
+            "$orderby": "receivedDateTime asc",
+            "$select": (
+                "id,webLink,conversationId,from,toRecipients,ccRecipients,subject,bodyPreview,receivedDateTime,"
+                "hasAttachments,importance,isRead,categories"
+            ),
         }
+
+        all_messages = []
         result = self._make_request("GET", endpoint, params=params)
-        if result and "value" in result:
-            return result["value"]
-        return None
+
+        while result:
+            messages = result.get("value", [])
+            all_messages.extend(messages)
+
+            if len(all_messages) >= max_results:
+                break
+
+            next_link = result.get("@odata.nextLink")
+            if not next_link:
+                break
+
+            # Follow pagination
+            self.token = self._get_token()
+            if not self.token:
+                break
+            try:
+                response = requests.get(next_link, headers={
+                    "Authorization": f"Bearer {self.token}",
+                    "Content-Type": "application/json",
+                })
+                response.raise_for_status()
+                result = response.json()
+            except requests.exceptions.RequestException as e:
+                logger.error(f"Pagination failed: {e}")
+                break
+
+        return all_messages[:max_results] if all_messages else None
 
     def get_sharepoint_site(self, site_hostname: str, site_path: str) -> Optional[dict]:
         """

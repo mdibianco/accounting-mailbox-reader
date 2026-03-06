@@ -108,6 +108,29 @@ After classifying, assess priority based on content, sender, context, and urgenc
 - Far-future planning (months out)
 - Marketing or promotional content
 
+**NO_ACTION_NEEDED** - Assign when email is clearly non-actionable for accounting:
+- Payment receipt confirmations (e.g., GitHub, AWS, SaaS subscription receipts)
+  * Sender: automated services (noreply@, no-reply@, support@, notifications@)
+  * Content: "Thanks for your purchase", receipt details, transaction confirmation
+  * Indicator: Email is informational confirmation of OUTGOING payment, NOT incoming invoice
+- Marketing/promotional content
+  * Sender: marketing@, promo@, newsletter@
+  * Content: Sales pitches, discounts, special offers
+  * Language: "Check out our offer", "Limited time", "Save now"
+- System/service notifications with no required action
+  * Sender: automated (no-reply@, noreply@, notifications@)
+  * Content: Status updates, subscription confirmations, automated alerts
+  * Tone: Neutral, informational only
+- Pattern: Sender is @eatplanted.com with Outlook calendar response subject (Accepted:, Tentative:, Declined:)
+  * Note: Calendar responses are usually caught by rigid rules (KEYWORD triage) with HIGH confidence
+- Pattern: Sender is jira@eatplanted.atlassian.net
+  * Note: Jira notifications are usually caught by rigid rules (KEYWORD triage) with HIGH confidence
+- CC-only visibility copies (accounting is just looped in, not addressed)
+  * Pattern: Sender is @eatplanted.com (internal), TO recipient is external (not @eatplanted.com), accounting@eatplanted.com is in CC (not TO)
+  * This means an internal employee sent an email to an external party and CC'd accounting for visibility
+  * Accounting has no action to take — they are just being kept in the loop
+  * Strong NO_ACTION_NEEDED signal, especially when the email content is a query/request directed at the external TO recipient
+
 **Additional Context Factors:**
 
 Time Sensitivity Patterns:
@@ -129,9 +152,49 @@ Attachment Context:
 - Payment proof/bank transfer: Usually MEDIUM unless referenced in urgent context
 - Signed contracts: INCREASE priority if approval/countersignature needed
 
+# Email Categories
+
+**VEN-INV** — A NEW invoice FROM a vendor TO Planted Foods. The vendor is billing us for goods/services delivered.
+First communication about this charge. Does NOT reference previous unpaid invoices, does NOT use urgency language.
+Expected action: Record in AP, verify receipt, schedule for payment run.
+
+VEN-INV requires EXPLICIT invoicing language or clear billing intent. Look for:
+- The word "invoice", "Rechnung", "facture", "fattura", "factuur" (or equivalent) in subject or body
+- An invoice number, a total amount due, payment terms, or a due date
+- Phrasing like "please pay", "amount due", "payment requested"
+
+Do NOT classify as VEN-INV if the email is:
+- A transport/logistics document (delivery notes, waybills, transport orders, "ordres de transport", "Lieferschein", "bon de livraison") — even if it includes pricing or "valued" amounts
+- A report, statement, or position summary ("Retour", "positions", "relevé", "Aufstellung", "rapport")
+- An attachment-only email with no explicit invoicing language in the body
+- Ambiguous: if the email does not clearly say "this is an invoice", classify as OTHER
+
+**VEN-REM** — PAYMENT REMINDER FROM a vendor. The vendor is reminding us that payment is overdue or approaching.
+This is a follow-up about a previously issued invoice, using reminder language (overdue, outstanding, reminder, Mahnung, etc.).
+Expected action: Check payment status, process payment if overdue.
+
+**VEN-FOLLOWUP** — QUERY/REQUEST FROM a vendor asking accounting for information, a decision, or a response.
+Examples: vendor asking which invoices to net against a credit balance, requesting remittance advice, asking for payment breakdown.
+Key distinction: Vendor is asking US for information/decisions, not demanding payment.
+Expected action: Accounting must actively respond with requested information or decision.
+
+**VEN-REMIT** is NOT used. Vendor queries are classified as VEN-FOLLOWUP.
+
+**CUST-REM-FOLLOWUP** — A CUSTOMER responding to a payment reminder that PLANTED sent them.
+The customer is responding to OUR reminder (not a vendor reminder to us).
+Expected action: Review customer account, verify invoice delivery, respond with clarification.
+
+**CUST-REMIT** — A CUSTOMER informing Planted of a payment made and providing remittance advice.
+The customer is telling us they paid and which of their invoices they allocated payment to.
+Expected action: Match payment to invoices in AR, reconcile, handle discrepancies.
+
+**NO_ACTION_NEEDED** — Email is clearly non-actionable for accounting (payment receipts, marketing, newsletters, automated notifications).
+
+**OTHER** — Email does not fit any of the above categories. Requires manual review.
+
 # Output Format
 
-You MUST return valid JSON matching this exact structure:
+You MUST return valid JSON matching this exact structure. Note: If the email is clearly non-actionable (payment receipt, marketing, newsletter), assign category `NO_ACTION_NEEDED` with priority `PRIO_LOW` and `confidence_level` appropriate to how certain you are.
 
 {
   "confidence_level": "HIGH|MEDIUM|LOW",

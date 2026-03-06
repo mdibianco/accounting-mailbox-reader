@@ -11,6 +11,41 @@ from .invoice_lookup import InvoiceLookup
 
 logger = logging.getLogger(__name__)
 
+# Priority ordering for comparison (higher index = higher priority)
+_PRIORITY_RANK = {
+    "PRIO_LOW": 0,
+    "PRIO_MEDIUM": 1,
+    "PRIO_HIGH": 2,
+    "PRIO_HIGHEST": 3,
+}
+
+# Reminder level → minimum priority floor
+_LEVEL_TO_PRIORITY = {
+    1: "PRIO_LOW",
+    2: "PRIO_MEDIUM",
+    3: "PRIO_HIGH",
+}
+
+
+def reconcile_priority(current_priority: str, urgency_level: Optional[int]) -> str:
+    """Return the highest priority between current classification priority and
+    the floor implied by the Pass 2 reminder/urgency level.
+
+    Rules:
+      - level 1 → at minimum PRIO_LOW
+      - level 2 → at minimum PRIO_MEDIUM
+      - level 3 → at minimum PRIO_HIGH
+      - Final priority = max(current_priority, level-derived priority)
+    """
+    if urgency_level is None:
+        return current_priority
+    level_prio = _LEVEL_TO_PRIORITY.get(urgency_level, "PRIO_MEDIUM")
+    current_rank = _PRIORITY_RANK.get(current_priority, 1)
+    level_rank = _PRIORITY_RANK.get(level_prio, 1)
+    if level_rank > current_rank:
+        return level_prio
+    return current_priority
+
 
 class Pass2Processor:
     """Orchestrates Pass 2 deep analysis for VEN-REM emails."""
@@ -19,7 +54,7 @@ class Pass2Processor:
         """Initialize Pass 2 processor."""
         self.provider = config.llm_provider
         self.temperature = 0.1
-        self.base_prompt = self._load_prompt()
+        self.base_prompt = self._build_system_prompt()
         self.invoice_lookup = InvoiceLookup()
 
         # Initialize LLM provider (same pattern as EmailClassifier)
@@ -45,6 +80,38 @@ class Pass2Processor:
         with open(prompt_file, "r", encoding="utf-8") as f:
             return f.read()
 
+    def _load_classification_prompt(self) -> str:
+        """Load the shared classification prompt for Pass2 context enrichment."""
+        prompt_file = Path(__file__).parent.parent / "config" / "classification_prompt.txt"
+        if not prompt_file.exists():
+            raise FileNotFoundError(f"Classification prompt not found: {prompt_file}")
+        with open(prompt_file, "r", encoding="utf-8") as f:
+            return f.read()
+
+    def _strip_output_section(self, prompt: str) -> str:
+        """Strip # Output Format and after — avoids schema conflict when concatenating."""
+        marker = "# Output Format"
+        idx = prompt.find(marker)
+        return prompt[:idx].rstrip() if idx != -1 else prompt
+
+    def _build_system_prompt(self) -> str:
+        """Concatenate classification context (no output schema) + pass2 task instructions.
+
+        This gives Pass2 full awareness of all categories when doing Task 0 reclassification,
+        without conflicting with the pass2 output schema.
+        """
+        classification_context = self._strip_output_section(
+            self._load_classification_prompt()
+        )
+        pass2_instructions = self._load_prompt()
+        return (
+            "# CATEGORY REFERENCE (Use for Task 0 reclassification decisions)\n\n"
+            + classification_context
+            + "\n\n---\n\n"
+            + "# PASS 2 TASK INSTRUCTIONS\n\n"
+            + pass2_instructions
+        )
+
     def process_email(self, email_dict: Dict) -> Optional[Dict]:
         """
         Run Pass 2 analysis on a single VEN-REM email.
@@ -55,11 +122,12 @@ class Pass2Processor:
         Returns:
             pass2_results dict, or None if not applicable.
         """
-        # Verify this is a VEN-REM email
+        # Verify this is a VEN-REM or VEN-FOLLOWUP email
         classification = email_dict.get("classification", {})
         primary_cat = classification.get("primary_category", {}).get("id", "")
-        if primary_cat != "VEN-REM":
-            logger.debug(f"Skipping non-VEN-REM email: {primary_cat}")
+        SUPPORTED_CATEGORIES = {"VEN-REM", "VEN-FOLLOWUP"}
+        if primary_cat not in SUPPORTED_CATEGORIES:
+            logger.debug(f"Skipping non-VEN-REM/VEN-FOLLOWUP email: {primary_cat}")
             return None
 
         try:
@@ -76,18 +144,18 @@ class Pass2Processor:
             extraction = json.loads(raw_response)
 
             # Check if LLM reclassified the email
-            verified_category = extraction.get("verified_category", "VEN-REM")
+            verified_category = extraction.get("verified_category", primary_cat)
             classification_verified = extraction.get("classification_verified", True)
 
-            if not classification_verified and verified_category != "VEN-REM":
+            if not classification_verified and verified_category != primary_cat:
                 logger.warning(
-                    f"Pass 2: LLM reclassified from VEN-REM to {verified_category}"
+                    f"Pass 2: LLM reclassified from {primary_cat} to {verified_category}"
                 )
                 return {
                     "pass2_timestamp": datetime.utcnow().isoformat() + "Z",
                     "pass2_model": model_used,
                     "reclassified": True,
-                    "reclassified_from": "VEN-REM",
+                    "reclassified_from": primary_cat,
                     "reclassified_to": verified_category,
                     "verification_reasoning": extraction.get("verification_reasoning", ""),
                     "urgency_level": None,
@@ -98,32 +166,22 @@ class Pass2Processor:
                 }
 
             logger.info(
-                f"Pass 2 LLM: verified=VEN-REM, urgency={extraction.get('urgency_level')}, "
+                f"Pass 2 LLM: verified={primary_cat}, urgency={extraction.get('urgency_level')}, "
                 f"entity={extraction.get('planted_entity_code')}, "
                 f"invoices={len(extraction.get('invoices', []))}"
             )
 
-            # Step 2: BC lookup for each invoice
+            # Step 2: BC lookup for each invoice (currently disabled)
             entity_code = extraction.get("planted_entity_code", "UNKNOWN")
             entity_name = config.entity_names.get(entity_code, "Unknown")
 
             invoices_with_bc = []
             for inv in extraction.get("invoices", []):
-                inv_number = inv.get("invoice_number", "")
-                if inv_number:
-                    bc_lookup = self.invoice_lookup.lookup_invoice(
-                        entity_code=entity_code,
-                        invoice_number=inv_number,
-                        vendor_name=inv.get("vendor_name"),
-                    )
-                else:
-                    bc_lookup = {
-                        "status": "NO_INVOICE_NUMBER",
-                        "found": False,
-                        "lookup_timestamp": datetime.utcnow().isoformat() + "Z",
-                    }
-
-                inv["bc_lookup"] = bc_lookup
+                inv["bc_lookup"] = {
+                    "status": "DISABLED",
+                    "found": False,
+                    "lookup_timestamp": datetime.utcnow().isoformat() + "Z",
+                }
                 invoices_with_bc.append(inv)
 
             # Build pass2_results
@@ -131,7 +189,7 @@ class Pass2Processor:
                 "pass2_timestamp": datetime.utcnow().isoformat() + "Z",
                 "pass2_model": model_used,
                 "classification_verified": True,
-                "verified_category": "VEN-REM",
+                "verified_category": primary_cat,
                 "verification_reasoning": extraction.get("verification_reasoning", ""),
                 "urgency_level": extraction.get("urgency_level"),
                 "urgency_reasoning": extraction.get("urgency_reasoning", ""),
@@ -183,7 +241,10 @@ class Pass2Processor:
             from_name = email.get("from_name", "Unknown")
             from_email_addr = email.get("from_email", "unknown@unknown.com")
 
-        prompt = f"""Analyze this vendor payment reminder:
+        # Extract primary category for context
+        primary_cat = email.get("classification", {}).get("primary_category", {}).get("id", "VEN-REM")
+
+        prompt = f"""Analyze this vendor email (pre-classified as {primary_cat}):
 
 **Email Details:**
 Subject: {email.get('subject', 'No subject')}
