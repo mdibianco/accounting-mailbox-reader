@@ -184,11 +184,20 @@ Expected action: Accounting must actively respond with requested information or 
 The customer is responding to OUR reminder (not a vendor reminder to us).
 Expected action: Review customer account, verify invoice delivery, respond with clarification.
 
-**CUST-REMIT** — A CUSTOMER informing Planted of a payment made and providing remittance advice.
+**CUST-PAYM** — A CUSTOMER informing Planted of a payment made and providing payment/remittance advice.
 The customer is telling us they paid and which of their invoices they allocated payment to.
 Expected action: Match payment to invoices in AR, reconcile, handle discrepancies.
 
 **NO_ACTION_NEEDED** — Email is clearly non-actionable for accounting (payment receipts, marketing, newsletters, automated notifications).
+
+**SUSPECT_PHISHING** — Email shows signs of phishing or impersonation. Always requires manual review.
+Strong phishing signals:
+- Sender domain is a default Microsoft 365 tenant (*.onmicrosoft.com) — legitimate companies use custom domains
+- Sender claims to represent a known company but email domain doesn't match (e.g., "Georg Jos. Kaes GmbH" sending from vmarktlab.onmicrosoft.com)
+- Unsolicited "invoice" or "bill" from an unknown sender with generic greeting
+- Sender address is unusually long, random-looking, or contains misspelled company names
+- Email asks to open an attachment urgently but provides no verifiable context
+Note: Most phishing is caught by rigid rules (keyword triage), but if you detect phishing signals the rules missed, classify as SUSPECT_PHISHING.
 
 **OTHER** — Email does not fit any of the above categories. Requires manual review.
 

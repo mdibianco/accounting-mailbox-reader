@@ -1,0 +1,62 @@
+# CUST-PAYM Case Definitions
+# Each case defines: trigger rules, entity mapping, bank account, and principal customer.
+#
+# Classification hierarchy (evaluated in order):
+#   1. sender_email_exact — exact sender address match
+#   2. sender_domain — substring match on sender domain
+#   3. subject_keywords — keyword match on subject line
+#   4. (fallback) — LLM classification to CUST-PAYM, then manual case assignment
+#
+# When a trigger matches, the email is classified as CUST-PAYM with the matched case_id.
+# Pass 2 then uses the case_id to select the correct attachment parser.
+
+version: 1
+
+cases:
+
+  LIDL:
+    description: "Lidl Dienstleistung GmbH & Co. KG — DE payment advice"
+    enabled: true
+
+    # ── Trigger rules (any match → CUST-PAYM / case LIDL) ──
+    triggers:
+      sender_email_exact:
+        - "lidl-avise@lidl.de"
+      # Future: could add sender_domain or subject_keywords
+      # sender_domain: []
+      # subject_keywords: []
+
+    # ── Entity & customer mapping ──
+    planted_entity: "DE1"            # Planted Foods GmbH (Berlin)
+    principal_customer_no: "SC10"    # BC customer number for Lidl Dienstleistung GmbH & Co. KG
+    principal_customer_name: "Lidl Dienstleistung GmbH & Co. KG"
+    currency: "EUR"
+
+    # ── Bank account for BC journal ──
+    bank_account_no: "BA999"         # Mock account for testing
+
+    # ── Journal configuration ──
+    journal_template: "CASHRCPT"     # BC Cash Receipt Journal template
+    journal_batch: "LIDL"            # BC journal batch name
+
+    # ── Parser settings ──
+    attachment_format: "pdf"         # Lidl sends a structured PDF
+    parser: "lidl_zahlungsavis"      # Parser function to use in pass2_cust_paym_processor
+
+  # ── Template for future cases ──
+  # EDEKA:
+  #   description: "EDEKA Zahlungsavis"
+  #   enabled: false
+  #   triggers:
+  #     sender_email_exact:
+  #       - "susanne.degener@edeka.de"
+  #       - "beleganforderung@edeka.de"
+  #   planted_entity: "DE1"
+  #   principal_customer_no: "SC_EDEKA"
+  #   principal_customer_name: "EDEKA Zentrale Stiftung & Co. KG"
+  #   currency: "EUR"
+  #   bank_account_no: "BA999"
+  #   journal_template: "CASHRCPT"
+  #   journal_batch: "EDEKA"
+  #   attachment_format: "pdf"
+  #   parser: "edeka_zahlungsavis"

@@ -21,8 +21,9 @@ class KeywordTriage:
         "VEN-REM": "Vendor Payment Reminder",
         "VEN-FOLLOWUP": "Vendor Follow-up Query",
         "CUST-REM-FOLLOWUP": "Customer Follow-up to Issued Payment Reminder",
-        "CUST-REMIT": "Customer Remittance Advice",
+        "CUST-PAYM": "Customer Payment Advice",
         "NO_ACTION_NEEDED": "No Action Needed",
+        "SUSPECT_PHISHING": "Suspected Phishing",
         "OTHER": "Uncategorized / Other",
     }
 
@@ -33,6 +34,9 @@ class KeywordTriage:
         self.settings = self.rules.get("settings", {})
         self.categories = self.rules.get("categories", {})
         self.priority_rules = self.rules.get("priority", {})
+
+        # Load CUST-PAYM case triggers
+        self._cust_paym_cases = self._load_cust_paym_cases()
 
         # Weights
         self.subject_weight = self.settings.get("subject_weight", 3.0)
@@ -51,6 +55,19 @@ class KeywordTriage:
             return {}
         with open(self.rules_file, "r", encoding="utf-8") as f:
             return yaml.safe_load(f) or {}
+
+    def _load_cust_paym_cases(self) -> dict:
+        """Load CUST-PAYM case definitions from config/cust_paym_cases.yaml.
+
+        Returns a dict of case_id -> case config for enabled cases.
+        """
+        cases_file = Path(__file__).parent.parent / "config" / "cust_paym_cases.yaml"
+        if not cases_file.exists():
+            return {}
+        with open(cases_file, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        cases = data.get("cases", {})
+        return {k: v for k, v in cases.items() if v.get("enabled", True)}
 
     def classify(self, email: Dict) -> Dict:
         """
@@ -79,7 +96,12 @@ class KeywordTriage:
             sender_email = (email.get("from_email") or "").lower()
             sender_name = (email.get("from_name") or "").lower()
 
-        # Check rigid rules first (high-certainty matches) before probabilistic scoring
+        # Check CUST-PAYM case triggers (sender-based, highest priority)
+        cust_paym_result = self._check_cust_paym_triggers(sender_email, subject_lower)
+        if cust_paym_result:
+            return cust_paym_result
+
+        # Check rigid rules (high-certainty matches) before probabilistic scoring
         rigid_result = self._check_rigid_rules(sender_email, subject_original)
         if rigid_result:
             return rigid_result
@@ -124,6 +146,12 @@ class KeywordTriage:
         """
         Check rigid high-certainty rules before probabilistic scoring.
         Returns a classification dict if a rule matches, None otherwise.
+
+        Rules support optional overrides:
+        - category: category ID (default: NO_ACTION_NEEDED)
+        - priority: priority level (default: PRIO_LOW)
+        - requires_manual_review: bool (default: False)
+        - sender_domain_ends_with: match end of sender domain (e.g., ".onmicrosoft.com")
         """
         rigid_rules = self.rules.get("rigid_rules", [])
         if not rigid_rules:
@@ -145,6 +173,13 @@ class KeywordTriage:
                 if rule["sender_domain"].lower() not in sender_email:
                     match = False
 
+            # Check sender_domain_ends_with (suffix match on the domain part)
+            if match and "sender_domain_ends_with" in rule:
+                domain_part = sender_email.split("@")[-1] if "@" in sender_email else ""
+                suffix = rule["sender_domain_ends_with"].lower()
+                if not domain_part.endswith(suffix):
+                    match = False
+
             # Check subject_starts_with (any prefix match)
             if match and "subject_starts_with" in rule:
                 prefixes = rule["subject_starts_with"]
@@ -156,27 +191,81 @@ class KeywordTriage:
                 if not prefix_match:
                     match = False
 
-            # If all conditions matched, return NO_ACTION_NEEDED with HIGH confidence
+            # If all conditions matched, return classification
             if match:
+                cat_id = rule.get("category", "NO_ACTION_NEEDED")
+                priority = rule.get("priority", "PRIO_LOW")
+                manual_review = rule.get("requires_manual_review", False)
                 logger.info(f"Rigid rule matched: {rule.get('description', 'Unknown rule')}")
                 return {
                     "confidence_level": "HIGH",
                     "primary_category": {
-                        "id": "NO_ACTION_NEEDED",
-                        "name": self.CATEGORY_NAMES.get("NO_ACTION_NEEDED", "No Action Needed"),
+                        "id": cat_id,
+                        "name": self.CATEGORY_NAMES.get(cat_id, cat_id),
                     },
                     "secondary_category": None,
-                    "priority": "PRIO_LOW",
-                    "requires_manual_review": False,
+                    "priority": priority,
+                    "requires_manual_review": manual_review,
                     "extracted_entities": {},
                     "summary": None,
-                    "reasoning": f"Rigid rule matched: {rule.get('description', 'No action needed email')}",
+                    "reasoning": f"Rigid rule matched: {rule.get('description', 'Unknown')}",
                     "classification_method": "keyword",
                     "keyword_confidence": 1.0,
                     "keyword_scores": {},
                 }
 
         return None
+
+    def _check_cust_paym_triggers(self, sender_email: str, subject_lower: str) -> Optional[Dict]:
+        """Check CUST-PAYM case triggers (sender email, domain, subject keywords).
+
+        Returns a classification dict with cust_paym_case_id if matched, None otherwise.
+        """
+        for case_id, case_cfg in self._cust_paym_cases.items():
+            triggers = case_cfg.get("triggers", {})
+
+            # 1. Exact sender email match
+            for addr in triggers.get("sender_email_exact", []):
+                if addr.lower() == sender_email:
+                    logger.info(f"CUST-PAYM trigger matched: sender {sender_email} -> case {case_id}")
+                    return self._build_cust_paym_result(case_id, case_cfg, f"sender {sender_email}")
+
+            # 2. Sender domain match
+            for domain in triggers.get("sender_domain", []):
+                if domain.lower() in sender_email:
+                    logger.info(f"CUST-PAYM trigger matched: domain {domain} -> case {case_id}")
+                    return self._build_cust_paym_result(case_id, case_cfg, f"sender domain {domain}")
+
+            # 3. Subject keyword match
+            for kw in triggers.get("subject_keywords", []):
+                if kw.lower() in subject_lower:
+                    logger.info(f"CUST-PAYM trigger matched: subject '{kw}' -> case {case_id}")
+                    return self._build_cust_paym_result(case_id, case_cfg, f"subject keyword '{kw}'")
+
+        return None
+
+    def _build_cust_paym_result(self, case_id: str, case_cfg: dict, trigger_desc: str) -> Dict:
+        """Build a CUST-PAYM classification result from a matched case."""
+        return {
+            "confidence_level": "HIGH",
+            "primary_category": {
+                "id": "CUST-PAYM",
+                "name": self.CATEGORY_NAMES.get("CUST-PAYM", "Customer Payment Advice"),
+            },
+            "secondary_category": None,
+            "priority": "PRIO_MEDIUM",
+            "requires_manual_review": False,
+            "extracted_entities": {
+                "customer": case_cfg.get("principal_customer_name"),
+                "currency": case_cfg.get("currency"),
+            },
+            "summary": None,
+            "reasoning": f"CUST-PAYM case {case_id} matched: {trigger_desc}",
+            "classification_method": "keyword",
+            "keyword_confidence": 1.0,
+            "keyword_scores": {},
+            "cust_paym_case_id": case_id,
+        }
 
     def _score_category(
         self,

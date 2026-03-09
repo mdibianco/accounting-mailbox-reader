@@ -44,9 +44,10 @@ Return ONLY valid JSON:
 
 If the email is ALREADY in English:
 - Still write the summary
-- Set body_english to null (no translation needed)
+- Set body_english to the original body text (copy it as-is)
 
 Important:
+- body_english must ALWAYS contain the full English text, never null
 - Always return valid JSON, no extra text
 - The summary should be in English regardless of the source language
 - Preserve invoice numbers, amounts, dates exactly as they appear
@@ -70,7 +71,7 @@ class EmailTranslator:
     def _init_gemini(self):
         """Initialize Gemini with cascade support."""
         import os
-        self.model = "gemini-2.5-flash"  # preferred; cascade handles fallback
+        self.model = "gemma-3-27b-it"  # cheap (14.4K RPD); cascade handles fallback
         api_key = os.environ.get("GEMINI_API_KEY", "")
         if api_key:
             logger.info("EmailTranslator using Gemini cascade via API key")
@@ -124,8 +125,11 @@ class EmailTranslator:
 
             result = self._parse_response(raw)
             result["model_used"] = model_used
+            # Ensure body_english is never null — fall back to original body
+            if not result.get("body_english"):
+                result["body_english"] = email.get("body") or email.get("body_preview") or ""
             body_en = result.get("body_english")
-            body_info = "null" if body_en is None else f"{len(body_en)} chars"
+            body_info = f"{len(body_en)} chars"
             logger.info(
                 f"Translated email: summary={len(result.get('summary', ''))} chars, "
                 f"body_english={body_info}, model={model_used}"

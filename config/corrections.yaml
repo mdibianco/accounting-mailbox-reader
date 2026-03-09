@@ -1,0 +1,13 @@
+- email_id: AAMkAGZkMzQyODEwLTJjNTUtNGFmZS1hM2Y4LWRiNzM3NzJmYTI1NQBGAAAAAADu20PK9fJAQIsOhAo3OOtQBwDPiI5YW3qnRa8b6gq8BEm6AATIk8QJAADPiI5YW3qnRa8b6gq8BEm6AATLM32eAAA=
+  date: '2026-03-05'
+  subject: Weiterverrechnung Hello Fresh
+  from: sarina.tandler@eatplanted.com
+  to:
+  - bestellungen.ch@eatplanted.com
+  - accounting@eatplanted.com
+  cc: []
+  original_category: null
+  original_priority: null
+  correct_category: OTHER
+  reasoning: ''
+  logged_at: '2026-03-09T09:00:53.036946+00:00'

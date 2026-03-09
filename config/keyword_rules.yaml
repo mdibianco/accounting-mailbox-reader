@@ -36,6 +36,16 @@ rigid_rules:
   - description: "Jira notification emails"
     sender_email_exact: "jira@eatplanted.atlassian.net"
 
+  # Suspected phishing: .onmicrosoft.com is the default Microsoft 365 tenant
+  # domain. Legitimate companies almost always use a custom domain.
+  # External senders from *.onmicrosoft.com claiming to send invoices/bills
+  # are a strong phishing signal.
+  - description: "Sender from default .onmicrosoft.com tenant (suspected phishing)"
+    sender_domain_ends_with: ".onmicrosoft.com"
+    category: "SUSPECT_PHISHING"
+    priority: "PRIO_HIGH"
+    requires_manual_review: true
+
 settings:
   high_confidence_threshold: 0.80
   medium_confidence_threshold: 0.50
@@ -350,10 +360,10 @@ categories:
       body: []
       sender_domain: []
 
-  # === CUST-REMIT: Customer Remittance Advice ===
+  # === CUST-PAYM: Customer Payment Advice ===
   # Customer informs Planted of payments made
-  CUST-REMIT:
-    name: "Customer Remittance Advice"
+  CUST-PAYM:
+    name: "Customer Payment Advice"
     keywords:
       subject:
         # English
@@ -437,7 +447,7 @@ categories:
       sender_domain: []
 
   # NOTE: VEN-FOLLOWUP (Vendor Follow-up Query) is NOT keyword-classifiable.
-  # It shares language with CUST-REMIT and overlaps with VEN-REM keywords.
+  # It shares language with CUST-PAYM and overlaps with VEN-REM keywords.
   # Intent detection requires LLM analysis — emails arrive as VEN-REM or OTHER,
   # then get reclassified to VEN-FOLLOWUP by Pass2 Task 0.
 

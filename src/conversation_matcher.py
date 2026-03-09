@@ -6,6 +6,14 @@ Approach:
 3. Last resort: Levenshtein on normalized subject (same sender domain only)
 4. Only look back 30 days — older conversations are considered dead
 
+**Supersession safety** (added March 2026):
+Before marking an older email as superseded, we VERIFY the chain link:
+- The new email must have a reply/forward prefix (RE:/FW:/AW:…) OR
+- The new email's body must contain a snippet of the older email's body
+- Levenshtein-only matches NEVER trigger supersession (informational only)
+This prevents false supersession of unrelated emails that happen to share
+a conversationId or subject line.
+
 The conversation index is a lightweight JSON file that stores entries by both
 graph_conversation_id and stripped_subject, so we never need to re-read
 hundreds of email JSONs on each run.
@@ -92,6 +100,80 @@ def levenshtein_similarity(s1: str, s2: str) -> float:
         prev = curr
 
     return 1.0 - prev[len2] / max_len
+
+
+def has_reply_forward_prefix(subject: str) -> bool:
+    """Check if the subject starts with a reply/forward prefix (RE:, FW:, AW:, etc.)."""
+    if not subject:
+        return False
+    return bool(_PREFIX_PATTERN.match(subject))
+
+
+# Minimum meaningful body length for containment checks
+_MIN_BODY_SNIPPET_LEN = 40
+# How many chars of the old body to use as a containment snippet
+_BODY_SNIPPET_LEN = 150
+
+
+def _extract_body_snippet(body: str) -> str:
+    """Extract a meaningful snippet from the beginning of an email body.
+
+    Skips common greetings/signatures and whitespace to get to real content.
+    Returns empty string if body is too short or only boilerplate.
+    """
+    if not body or len(body.strip()) < _MIN_BODY_SNIPPET_LEN:
+        return ""
+    # Take a chunk from the body, skip first line (often a greeting)
+    lines = body.strip().splitlines()
+    # Skip empty lines and very short greeting lines at the start
+    meaningful_lines = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        # Skip typical greetings (< 40 chars, likely "Dear X," or "Hi,")
+        if len(stripped) < 40 and not meaningful_lines:
+            continue
+        meaningful_lines.append(stripped)
+        if len(" ".join(meaningful_lines)) >= _BODY_SNIPPET_LEN:
+            break
+    snippet = " ".join(meaningful_lines)[:_BODY_SNIPPET_LEN]
+    return snippet.lower().strip()
+
+
+def _verify_chain_link(
+    new_subject: str,
+    new_body: str | None,
+    old_filename: str,
+    email_folder: str,
+) -> bool:
+    """Verify that a new email is genuinely a reply/forward of the old email.
+
+    Two independent checks (either passing = verified):
+    1. Subject prefix: new email has RE:/FW:/AW: etc. prefix
+    2. Body containment: old email's body snippet appears in new email's body
+
+    Returns True if the chain link is confirmed, False otherwise.
+    """
+    # Check 1: Does the new email have a reply/forward prefix?
+    if has_reply_forward_prefix(new_subject):
+        return True
+
+    # Check 2: Body containment — read old email JSON and check snippet
+    if new_body:
+        old_path = Path(email_folder) / old_filename
+        if old_path.exists():
+            try:
+                with open(old_path, "r", encoding="utf-8") as f:
+                    old_data = json.load(f)
+                old_body = old_data.get("body") or old_data.get("body_preview") or ""
+                snippet = _extract_body_snippet(old_body)
+                if snippet and snippet in new_body.lower():
+                    return True
+            except Exception as e:
+                logger.debug(f"Could not read old email for verification: {e}")
+
+    return False
 
 
 class ConversationIndex:
@@ -273,22 +355,23 @@ class ConversationIndex:
         graph_conversation_id: Optional[str],
         normalized_subject: str,
         sender_domain: str,
-    ) -> Optional[tuple[str, list[dict]]]:
+    ) -> Optional[tuple[str, list[dict], str]]:
         """Find a matching conversation.
 
-        Returns (conversation_id, entries) or None.
+        Returns (conversation_id, entries, match_method) or None.
+        match_method is one of: "graph_id", "subject", "levenshtein".
         Tries: graph_conversation_id → exact subject → Levenshtein subject.
         """
         # Step 1: Graph conversationId (most reliable — handles subject mutations, cross-domain)
         if graph_conversation_id and graph_conversation_id in self.by_graph_id:
             group = self.by_graph_id[graph_conversation_id]
             logger.debug(f"Graph ID match: {graph_conversation_id[:20]}...")
-            return group["conversation_id"], group["entries"]
+            return group["conversation_id"], group["entries"], "graph_id"
 
         # Step 2: Exact match on normalized subject
         if normalized_subject and normalized_subject in self.by_subject:
             group = self.by_subject[normalized_subject]
-            return group["conversation_id"], group["entries"]
+            return group["conversation_id"], group["entries"], "subject"
 
         # Step 3: Levenshtein fallback (same sender domain only)
         if not normalized_subject:
@@ -313,7 +396,7 @@ class ConversationIndex:
             score = levenshtein_similarity(normalized_subject, idx_subject)
             if score > best_score and score >= SUBJECT_SIMILARITY_THRESHOLD:
                 best_score = score
-                best_match = (group["conversation_id"], group["entries"])
+                best_match = (group["conversation_id"], group["entries"], "levenshtein")
 
         if best_match:
             logger.info(
@@ -433,8 +516,7 @@ def match_conversations(
         match = index.find_conversation(graph_conv_id, norm_subj, sender_dom)
 
         if match:
-            conv_id, entries = match
-            new_wins = _should_supersede_old(has_att, entries)
+            conv_id, entries, match_method = match
 
             related = [
                 {
@@ -446,7 +528,35 @@ def match_conversations(
                 for e in entries
             ]
 
-            if new_wins:
+            # ── Supersession safety: verify chain link before superseding ──
+            # Levenshtein matches NEVER supersede (too unreliable)
+            if match_method == "levenshtein":
+                can_supersede = False
+                logger.info(
+                    f"Levenshtein match for '{subject[:50]}' — "
+                    f"chain link only, no supersession"
+                )
+            else:
+                # For graph_id and subject matches: verify at least one old
+                # email is genuinely part of this reply/forward chain
+                new_body = email_dict.get("body") or email_dict.get("body_preview") or ""
+                verified = False
+                for old_entry in entries:
+                    if _verify_chain_link(subject, new_body, old_entry["filename"], email_folder):
+                        verified = True
+                        break
+
+                if verified:
+                    can_supersede = _should_supersede_old(has_att, entries)
+                else:
+                    can_supersede = False
+                    logger.info(
+                        f"Chain link NOT verified for '{subject[:50]}' "
+                        f"(match_method={match_method}, {len(entries)} prior) — "
+                        f"no supersession"
+                    )
+
+            if can_supersede:
                 # New email is the active one; supersede all prior
                 supersedes = [e["filename"] for e in entries]
                 results[email_id] = {
@@ -466,8 +576,7 @@ def match_conversations(
                                 results[prev_id]["is_latest"] = False
                             break
             else:
-                # Old email has attachments, new doesn't — both stay in inbox
-                # Neither supersedes the other (old has docs, new has latest context)
+                # No supersession — both stay in inbox, but mark as chain
                 results[email_id] = {
                     "conversation_id": conv_id,
                     "is_latest": True,
@@ -476,10 +585,13 @@ def match_conversations(
                     "related_emails": related,
                     "supersedes": [],
                 }
-                logger.info(
-                    f"Attachment precedence: both stay active "
-                    f"(old has attachments, new '{subject[:40]}' has latest context)"
-                )
+                if not can_supersede and match_method != "levenshtein":
+                    # Attachment precedence or verification failure
+                    if _should_supersede_old(has_att, entries) is False:
+                        logger.info(
+                            f"Attachment precedence: both stay active "
+                            f"(old has attachments, new '{subject[:40]}' has latest context)"
+                        )
 
             # Add to index
             index.add_entry(
@@ -493,7 +605,7 @@ def match_conversations(
             logger.info(
                 f"Conversation match: '{subject[:50]}' → conv {conv_id} "
                 f"(pos {len(entries) + 1}, {len(entries)} prior, "
-                f"new_wins={new_wins})"
+                f"match={match_method}, supersede={can_supersede})"
             )
         else:
             # New conversation

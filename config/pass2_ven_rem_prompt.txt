@@ -20,7 +20,7 @@ A true VEN-REM email is:
 It is NOT VEN-REM if:
 - VEN-INV: A new invoice being sent (no reminder language, no reference to overdue payment)
 - CUST-REM-FOLLOWUP: A customer responding to a reminder PLANTED sent them (look for "Issued reminder")
-- CUST-REMIT: A customer informing Planted of payments they made
+- CUST-PAYM: A customer informing Planted of payments they made
 - VEN-FOLLOWUP: Vendor is asking Planted for information, decisions, or a response (not just demanding payment).
   Includes: remittance advice requests, asking which invoices to net against a credit/Guthaben,
   payment breakdown queries, account statement confirmations.

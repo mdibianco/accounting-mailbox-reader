@@ -33,6 +33,7 @@ let
             subject             = try j[subject] otherwise null,
             received_datetime   = try DateTimeZone.FromText(j[received_datetime]) otherwise null,
             body_preview        = try j[body_preview] otherwise null,
+            body                = try j[body] otherwise null,
             has_attachments     = try j[has_attachments] otherwise null,
             is_read             = try j[is_read] otherwise null,
             importance          = try j[importance] otherwise null,
@@ -71,10 +72,19 @@ let
             inv_invoices_address = try p2[invoices_address] otherwise null,
             inv_draft_reply_created = try p2[draft_reply_created] otherwise null,
 
+            // Pass 2 CUST-REM-FOLLOWUP specific
+            cust_reminder_number = try p2[cust_reminder_number] otherwise null,
+            cust_sender_domain   = try p2[cust_sender_domain] otherwise null,
+
             // Translation
             body_english        = try j[body_english] otherwise null,
 
+            // Recipients (flattened to semicolon-separated strings)
+            to_recipients_text  = try Text.Combine(List.Transform(j[to_recipients], each Record.Field(_, "email")), "; ") otherwise null,
+            cc_recipients_text  = try Text.Combine(List.Transform(j[cc_recipients], each Record.Field(_, "email")), "; ") otherwise null,
+
             // Conversation threading
+            graph_conversation_id     = try j[graph_conversation_id] otherwise null,
             is_latest_in_conversation = try j[is_latest_in_conversation] otherwise true,
             is_chain   = try j[is_chain] otherwise false,
             conversation_id           = try j[conversation_id] otherwise null,
@@ -92,7 +102,7 @@ let
     Expanded = Table.ExpandRecordColumn(AddFields, "Parsed", {
         "email_id", "outlook_link", "processing_status",
         "from_email", "from_name", "subject", "received_datetime",
-        "body_preview", "has_attachments", "is_read", "importance",
+        "body_preview", "body", "has_attachments", "is_read", "importance",
         "category_id", "category_name", "confidence_level", "priority",
         "classification_method", "keyword_confidence", "requires_manual_review",
         "summary", "reasoning",
@@ -102,8 +112,10 @@ let
         "planted_entity_code", "planted_entity_name", "verified_category",
         "invoice_count",
         "inv_action_taken", "inv_forwarded_to", "inv_invoices_address", "inv_draft_reply_created",
+        "cust_reminder_number", "cust_sender_domain",
         "body_english",
-        "is_latest_in_conversation", "is_chain", "conversation_id", "conversation_position",
+        "to_recipients_text", "cc_recipients_text",
+        "graph_conversation_id", "is_latest_in_conversation", "is_chain", "conversation_id", "conversation_position",
         "jira_issue_key",
         "json_filename"
     }),
@@ -112,7 +124,7 @@ let
     Cleaned = Table.SelectColumns(Expanded, {
         "email_id", "outlook_link", "processing_status",
         "from_email", "from_name", "subject", "received_datetime",
-        "body_preview", "has_attachments", "is_read", "importance",
+        "body_preview", "body", "has_attachments", "is_read", "importance",
         "category_id", "category_name", "confidence_level", "priority",
         "classification_method", "keyword_confidence", "requires_manual_review",
         "summary", "reasoning",
@@ -122,8 +134,10 @@ let
         "planted_entity_code", "planted_entity_name", "verified_category",
         "invoice_count",
         "inv_action_taken", "inv_forwarded_to", "inv_invoices_address", "inv_draft_reply_created",
+        "cust_reminder_number", "cust_sender_domain",
         "body_english",
-        "is_latest_in_conversation", "is_chain", "conversation_id", "conversation_position",
+        "to_recipients_text", "cc_recipients_text",
+        "graph_conversation_id", "is_latest_in_conversation", "is_chain", "conversation_id", "conversation_position",
         "jira_issue_key"
     }),
 

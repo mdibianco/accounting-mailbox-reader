@@ -114,11 +114,10 @@ class Email:
             data["classification"] = self.classification
         if self.pass2_results:
             data["pass2_results"] = self.pass2_results
-        if self.body_english:
-            data["body_english"] = self._truncate(self.body_english, MAX_BODY_ENGLISH_CHARS)
+        # body_english is always present: translated text for non-English, original body for English
+        data["body_english"] = self._truncate(self.body_english, MAX_BODY_ENGLISH_CHARS) if self.body_english else None
         # Conversation threading
-        if self.graph_conversation_id:
-            data["graph_conversation_id"] = self.graph_conversation_id
+        data["graph_conversation_id"] = self.graph_conversation_id
         if self.conversation_id:
             data["conversation_id"] = self.conversation_id
             data["conversation_position"] = self.conversation_position

@@ -16,7 +16,8 @@ from src.config import config
 from src.email_classifier import EmailClassifier
 from src.confluence_sync import ConfluenceSyncer
 from src.pass2_processor import Pass2Processor, reconcile_priority, _PRIORITY_RANK
-from src.pass2_inv_processor import Pass2InvProcessor
+from src.pass2_inv_processor import Pass2InvProcessor, ARCHIVE_ACTIONS as VEN_INV_ARCHIVE_ACTIONS
+from src.pass2_cust_rem_processor import Pass2CustRemProcessor
 from src.keyword_triage import KeywordTriage
 from src.email_translator import EmailTranslator
 from src.conversation_matcher import match_conversations, update_superseded_jsons
@@ -25,6 +26,8 @@ from src.graph_client import GraphAPIClient
 from src.daily_stats import DailyStats
 from src.jira_client import JiraClient
 from src.correction_logger import scan_corrections, get_pending_corrections_count
+from src.pass2_cust_paym_processor import Pass2CustPaymProcessor
+from src.bc_package_generator import generate_bc_package
 
 # Configure logging
 logging.basicConfig(
@@ -375,18 +378,17 @@ def read(mailbox, days, max, format, output, no_attachments, no_body, search, up
             else:
                 click.echo("No VEN-REM emails found for Pass 2 analysis.\n")
 
-        # ── Translation: English summary + body for non-English emails ──
-        # Translate emails that: have no pass2_results, confidence >= MEDIUM, not already English
+        # ── Translation: English summary + body_english for ALL classified emails ──
+        # Every email gets a body_english field (original body if English, translation otherwise)
         emails_for_translation = [
             e for e in emails
             if e.classification
-            and not e.pass2_results
             and e.classification.get("confidence_level") in ("HIGH", "MEDIUM")
-            and not EmailTranslator.is_likely_english(e.to_dict())
+            and not e.body_english  # skip if already translated (e.g. re-run)
         ]
 
         if emails_for_translation:
-            click.echo(f"Translating {len(emails_for_translation)} non-English emails...")
+            click.echo(f"Translating {len(emails_for_translation)} emails (summary + body_english)...")
             try:
                 translator = EmailTranslator()
                 for idx, email in enumerate(emails_for_translation, 1):
@@ -918,16 +920,26 @@ def process(mailbox, upload_sharepoint, dry_run):
                         )
                         if pass2_result:
                             email.pass2_results = pass2_result
-                            # VEN-INV stays in inbox for manual review (no auto-archive)
-                            email.processing_status = "NEEDS REVIEW > NEW INVOICE"
                             action = pass2_result.get("action_taken", "UNKNOWN")
                             click.echo(f"    [{action}]")
 
-                            # Send Teams notification
-                            if action == "UNKNOWN_ENTITY":
+                            if action in VEN_INV_ARCHIVE_ACTIONS:
+                                # Successfully handled → archive
+                                email.processing_status = "ARCHIVE > PROCESSED BY AGENT"
+                                processed_count += 1
+                                notifier.notify_ven_inv_processed(email.to_dict(), pass2_result)
+                            elif action == "UNKNOWN_ENTITY":
+                                email.processing_status = "NEEDS REVIEW > NEW INVOICE"
                                 notifier.notify_ven_inv_unknown_entity(email.to_dict())
                                 unknown_count += 1
+                            elif action == "DRAFT_FORWARD_CREATED":
+                                # CH1: draft forward created, needs manual send
+                                email.processing_status = "NEEDS REVIEW > DRAFT FORWARD (CH1)"
+                                notifier.notify_ven_inv_processed(email.to_dict(), pass2_result)
+                                processed_count += 1
                             else:
+                                # FORWARD_FAILED or other — keep for review
+                                email.processing_status = "NEEDS REVIEW > NEW INVOICE"
                                 notifier.notify_ven_inv_processed(email.to_dict(), pass2_result)
                                 processed_count += 1
 
@@ -941,6 +953,81 @@ def process(mailbox, upload_sharepoint, dry_run):
                 except Exception as e:
                     click.echo(f"  [ERR] VEN-INV: {e}", err=True)
 
+            # ── 5b2. Pass 2 on CUST-REM-FOLLOWUP emails ──
+            cust_rem = [
+                e for e in emails
+                if e.classification.get("primary_category", {}).get("id") == "CUST-REM-FOLLOWUP"
+            ]
+
+            if cust_rem:
+                click.echo(f"\nPass 2: CUST-REM-FOLLOWUP extraction on {len(cust_rem)} emails...")
+                try:
+                    cust_rem_proc = Pass2CustRemProcessor()
+                    reclassified_count = 0
+                    crep_count = 0
+                    for email in cust_rem:
+                        click.echo(f"  Pass 2: {email.subject[:50]}...")
+                        pass2_result = cust_rem_proc.process_email(email.to_dict())
+                        if pass2_result:
+                            email.pass2_results = pass2_result
+                            if pass2_result.get("reclassified"):
+                                new_cat = pass2_result["reclassified_to"]
+                                click.echo(f"    [RECLASSIFIED] CUST-REM-FOLLOWUP -> {new_cat}")
+                                email.classification["primary_category"] = {
+                                    "id": new_cat,
+                                    "name": KeywordTriage.CATEGORY_NAMES.get(new_cat, new_cat),
+                                }
+                                email.classification["classification_method"] = "llm_reclassified"
+                                reclassified_count += 1
+                            elif pass2_result.get("cust_reminder_number"):
+                                click.echo(f"    [CREP] {pass2_result['cust_reminder_number']}")
+                                crep_count += 1
+                    cust_rem_proc.close()
+                    click.echo(
+                        f"  [OK] CUST-REM-FOLLOWUP complete "
+                        f"({crep_count} with CREP, {reclassified_count} reclassified, "
+                        f"{cust_rem_proc.llm_calls} LLM calls)"
+                    )
+                except Exception as e:
+                    click.echo(f"  [ERR] CUST-REM-FOLLOWUP: {e}", err=True)
+
+            # ── 5b3. Pass 2 on CUST-PAYM emails ──
+            cust_paym = [
+                e for e in emails
+                if e.classification.get("primary_category", {}).get("id") == "CUST-PAYM"
+            ]
+
+            if cust_paym:
+                click.echo(f"\nPass 2: CUST-PAYM extraction on {len(cust_paym)} emails...")
+                try:
+                    cust_paym_proc = Pass2CustPaymProcessor()
+                    bc_output_dir = Path(os.getenv(
+                        "BC_PACKAGE_OUTPUT_DIR",
+                        os.path.join(config.local_folder_path, "output") if config.local_folder_path else "output",
+                    ))
+                    for email in cust_paym:
+                        click.echo(f"  Pass 2: {email.subject[:60]}...")
+                        pass2_result = cust_paym_proc.process_email(email.to_dict(), graph_client=reader.graph_client)
+                        if pass2_result:
+                            email.pass2_results = pass2_result
+                            case_id = pass2_result.get("cust_paym_case_id", "?")
+                            if pass2_result.get("error"):
+                                click.echo(f"    [WARN] {pass2_result['error']}")
+                            else:
+                                click.echo(
+                                    f"    [OK] Case {case_id}: {pass2_result.get('line_item_count', 0)} items, "
+                                    f"{pass2_result.get('total_amount', 0):,.2f} {pass2_result.get('currency', '')}"
+                                )
+                                # Generate BC configuration package
+                                pkg_path = generate_bc_package(pass2_result, bc_output_dir, email.subject)
+                                if pkg_path:
+                                    click.echo(f"    [BC] Package: {pkg_path.name}")
+                                    email.processing_status = "ARCHIVE > PROCESSED BY AGENT"
+                    cust_paym_proc.close()
+                    click.echo(f"  [OK] CUST-PAYM complete ({cust_paym_proc.processed_count} processed)")
+                except Exception as e:
+                    click.echo(f"  [ERR] CUST-PAYM: {e}", err=True)
+
             # ── 5c. Mark NO_ACTION_NEEDED emails for archiving ──
             no_action = [
                 e for e in emails
@@ -951,6 +1038,17 @@ def process(mailbox, upload_sharepoint, dry_run):
                 for email in no_action:
                     email.processing_status = "ARCHIVE > PROCESSED BY AGENT"
                 click.echo(f"  [OK] {len(no_action)} emails marked for archiving")
+
+            # ── 5c2. Flag SUSPECT_PHISHING emails for manual review ──
+            suspect_phishing = [
+                e for e in emails
+                if e.classification.get("primary_category", {}).get("id") == "SUSPECT_PHISHING"
+            ]
+            if suspect_phishing:
+                click.echo(f"\n*** {len(suspect_phishing)} SUSPECT PHISHING email(s) detected! ***")
+                for email in suspect_phishing:
+                    email.processing_status = "NEEDS REVIEW > SUSPECT PHISHING"
+                    click.echo(f"  [!] {email.subject[:70]} (from: {email.from_email})")
 
             # ── 5d. Jira ticket creation ──
             jira = JiraClient()
@@ -991,13 +1089,12 @@ def process(mailbox, upload_sharepoint, dry_run):
                             click.echo(f"  [CREATED] {key} ({trigger}): {safe_subj}")
                     click.echo(f"  [OK] Jira: {jira_created} ticket(s) created")
 
-            # ── 6. Translation for non-English emails ──
+            # ── 6. Translation: summary + body_english for ALL classified emails ──
             to_translate = [
                 e for e in emails
                 if e.classification
-                and not e.pass2_results
                 and e.classification.get("confidence_level") in ("HIGH", "MEDIUM")
-                and not EmailTranslator.is_likely_english(e.to_dict())
+                and not e.body_english  # skip if already translated
             ]
             if to_translate:
                 click.echo(f"\nTranslating {len(to_translate)} non-English emails...")
@@ -1117,9 +1214,20 @@ def process(mailbox, upload_sharepoint, dry_run):
             elif dry_run:
                 click.echo("(dry run — watermark not updated)")
 
-        # ── 10. Scan inbox for human-completed flags → archive ──
+        # ── 10. Scan inbox for human-completed emails → archive ──
+        # Primary: look for "DONE" Outlook category (reliable on shared mailboxes)
+        # Fallback: also check flag/flagStatus=complete (works on personal mailboxes)
         click.echo("\nScanning inbox for human-completed emails...")
-        completed = reader.graph_client.get_inbox_messages_by_flag(mailbox, "complete")
+        completed_by_cat = reader.graph_client.get_inbox_messages_by_category(mailbox, "DONE") or []
+        completed_by_flag = reader.graph_client.get_inbox_messages_by_flag(mailbox, "complete") or []
+
+        # Merge and deduplicate by message ID
+        seen_ids = set()
+        completed = []
+        for msg in completed_by_cat + completed_by_flag:
+            if msg["id"] not in seen_ids:
+                seen_ids.add(msg["id"])
+                completed.append(msg)
 
         if completed:
             click.echo(f"  Found {len(completed)} human-completed email(s)")
@@ -1259,7 +1367,7 @@ def cleanup(folder, budget, days, mailbox, dry_run, upload_sharepoint):
     """Batch-process emails from an Outlook folder (e.g. Reminders cleanup).
 
     Designed to run after the normal process command, using remaining daily API budget.
-    Each VEN-REM email costs 1 API call (Pass 2). No translation to save budget.
+    Each VEN-REM email costs 1 API call (Pass 2) + 1 translation call (Gemma).
 
     Examples:
         python main.py cleanup                              # Use remaining budget

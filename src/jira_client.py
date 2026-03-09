@@ -18,6 +18,13 @@ ASSIGNEE_MAP = {
     "OTHER":        "6396e8f13c9bcd363976d34e",                       # Matthias Di Bianco
 }
 
+PRIORITY_MAP = {
+    "PRIO_HIGHEST": {"name": "Highest"},
+    "PRIO_HIGH": {"name": "High"},
+    "PRIO_MEDIUM": {"name": "Medium"},
+    "PRIO_LOW": {"name": "Low"},
+}
+
 TRIGGER_REASONS = {
     "PRIO_HIGHEST": "Highest priority flag - requires immediate attention",
     "VEN-FOLLOWUP": "Vendor query requiring active accounting response",
@@ -99,6 +106,8 @@ class JiraClient:
         summary = f"MAIL: {subject}"[:255]
         description_adf = self._build_description(email_dict, trigger)
         assignee_id = ASSIGNEE_MAP.get(trigger)
+        prio = email_dict.get("classification", {}).get("priority", "")
+        jira_priority = PRIORITY_MAP.get(prio)
 
         payload = {
             "fields": {
@@ -110,6 +119,8 @@ class JiraClient:
         }
         if assignee_id:
             payload["fields"]["assignee"] = {"accountId": assignee_id}
+        if jira_priority:
+            payload["fields"]["priority"] = jira_priority
 
         try:
             resp = requests.post(

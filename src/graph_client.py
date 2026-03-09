@@ -366,8 +366,61 @@ class GraphAPIClient:
         result = self._make_request("POST", endpoint, json=payload)
         return result is not None
 
+    def create_draft_forward(
+        self, mailbox: str, message_id: str, to_addresses: list,
+        comment: str = "", cc_addresses: list | None = None,
+    ) -> Optional[str]:
+        """
+        Create a draft forward of a message (not sent, stays in Drafts).
+
+        Args:
+            mailbox: Email address of the mailbox
+            message_id: Message ID to forward
+            to_addresses: List of email addresses to forward to
+            comment: Optional comment to include in the forward
+            cc_addresses: Optional list of email addresses to CC
+
+        Returns:
+            Draft message ID if successful, None otherwise
+        """
+        endpoint = f"/users/{mailbox}/messages/{message_id}/createForward"
+        draft_result = self._make_request("POST", endpoint, json={})
+
+        if not draft_result or "id" not in draft_result:
+            logger.error("Failed to create draft forward")
+            return None
+
+        draft_id = draft_result["id"]
+
+        # Update with recipients and comment
+        update_payload = {
+            "toRecipients": [
+                {"emailAddress": {"address": addr}} for addr in to_addresses
+            ]
+        }
+        if comment:
+            update_payload["body"] = {
+                "contentType": "HTML",
+                "content": f"<p>{comment}</p>"
+            }
+        if cc_addresses:
+            update_payload["ccRecipients"] = [
+                {"emailAddress": {"address": addr}} for addr in cc_addresses
+            ]
+
+        endpoint = f"/users/{mailbox}/messages/{draft_id}"
+        update_result = self._make_request("PATCH", endpoint, json=update_payload)
+
+        if update_result:
+            logger.info(f"Draft forward created: {draft_id}")
+            return draft_id
+        else:
+            logger.error(f"Failed to update draft forward: {draft_id}")
+            return None
+
     def create_draft_reply(
-        self, mailbox: str, message_id: str, body_html: str
+        self, mailbox: str, message_id: str, body_html: str,
+        cc_addresses: list | None = None,
     ) -> Optional[str]:
         """
         Create a draft reply to a message.
@@ -376,6 +429,7 @@ class GraphAPIClient:
             mailbox: Email address of the mailbox
             message_id: Message ID to reply to
             body_html: Reply body in HTML format
+            cc_addresses: Optional list of email addresses to CC
 
         Returns:
             Draft message ID if successful, None otherwise
@@ -390,18 +444,21 @@ class GraphAPIClient:
 
         draft_id = draft_result["id"]
 
-        # Now update the draft with the body content
-        endpoint = f"/users/{mailbox}/messages/{draft_id}"
-        update_result = self._make_request(
-            "PATCH",
-            endpoint,
-            json={
-                "body": {
-                    "contentType": "HTML",
-                    "content": body_html
-                }
+        # Build update payload with body (and optional CC)
+        update_payload = {
+            "body": {
+                "contentType": "HTML",
+                "content": body_html
             }
-        )
+        }
+        if cc_addresses:
+            update_payload["ccRecipients"] = [
+                {"emailAddress": {"address": addr}} for addr in cc_addresses
+            ]
+
+        # Now update the draft with body + CC
+        endpoint = f"/users/{mailbox}/messages/{draft_id}"
+        update_result = self._make_request("PATCH", endpoint, json=update_payload)
 
         if update_result:
             logger.info(f"Draft reply created: {draft_id}")
@@ -508,6 +565,45 @@ class GraphAPIClient:
         while True:
             params = {
                 "$filter": f"flag/flagStatus eq '{flag_status}'",
+                "$select": "id,subject,receivedDateTime,flag,categories",
+                "$top": page_size,
+                "$skip": skip,
+            }
+            result = self._make_request("GET", endpoint, params=params)
+            if result and "value" in result:
+                messages = result["value"]
+                if not messages:
+                    break
+                all_messages.extend(messages)
+                skip += page_size
+            else:
+                break
+
+        return all_messages if all_messages else None
+
+    def get_inbox_messages_by_category(
+        self, mailbox: str, category: str = "DONE"
+    ) -> Optional[list]:
+        """
+        Get ALL messages in Inbox that have a specific Outlook category (with pagination).
+
+        Categories are reliable on shared mailboxes (unlike flags which are per-user).
+
+        Args:
+            mailbox: Email address
+            category: Outlook category name to search for
+
+        Returns:
+            List of all matching messages or None
+        """
+        endpoint = f"/users/{mailbox}/mailFolders/inbox/messages"
+        all_messages = []
+        skip = 0
+        page_size = 250
+
+        while True:
+            params = {
+                "$filter": f"categories/any(c:c eq '{category}')",
                 "$select": "id,subject,receivedDateTime,flag,categories",
                 "$top": page_size,
                 "$skip": skip,
